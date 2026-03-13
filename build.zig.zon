@@ -1,0 +1,20 @@
+.{
+    .name = .quake3_pk3_viewer,
+    .version = "0.1.0",
+    .fingerprint = 0x68f14ec1ceeaa678,
+    .minimum_zig_version = "0.15.1",
+    .dependencies = .{
+        .raylib = .{
+            .url = "git+https://github.com/raysan5/raylib#9f831428e6be0eba8762a154e3e9139d4f071970",
+            .hash = "raylib-5.6.0-dev-whq8uL592gQ782dF95oci4S61qrNVYK3MhpUpNwFgZ1J",
+        },
+    },
+    .paths = .{
+        "README.md",
+        "build.zig",
+        "build.zig.zon",
+        "src",
+        "assets",
+        "vendor",
+    },
+}

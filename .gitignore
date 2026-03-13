@@ -1,0 +1,10 @@
+zig-cache/
+.zig-cache/
+zig-out/
+.tmp/
+.inspect/
+assets/extracted/
+.idea/
+Project/*
+libraylib.a
+**/.DS_Store
