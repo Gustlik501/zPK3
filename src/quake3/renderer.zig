@@ -61,6 +61,7 @@ const RenderMode = qscene.RenderMode;
 const MaterialRule = qscene.MaterialRule;
 
 const SurfaceBatch = struct {
+    binding: MaterialBinding,
     model: rl.Model,
     wire_positions: []f32,
     material_name: []const u8,
@@ -69,6 +70,38 @@ const SurfaceBatch = struct {
     use_lightmap: bool,
     double_sided: bool,
     alpha_cutoff: f32,
+};
+
+const MaterialBinding = struct {
+    mode: enum {
+        static,
+        animated_loop,
+        animated_once,
+    } = .static,
+    static_texture: rl.Texture2D,
+    animated_frames: []rl.Texture2D = &.{},
+    fps: f32 = 0.0,
+
+    fn deinit(self: *MaterialBinding, allocator: std.mem.Allocator) void {
+        allocator.free(self.animated_frames);
+        self.* = undefined;
+    }
+
+    fn currentTexture(self: *const MaterialBinding, time_seconds: f64) rl.Texture2D {
+        switch (self.mode) {
+            .static => return self.static_texture,
+            .animated_loop, .animated_once => {
+                if (self.animated_frames.len == 0 or self.fps <= 0.0) return self.static_texture;
+                const raw_index: usize = @intFromFloat(@max(@floor(time_seconds * @as(f64, self.fps)), 0.0));
+                const frame_index = switch (self.mode) {
+                    .animated_loop => raw_index % self.animated_frames.len,
+                    .animated_once => @min(raw_index, self.animated_frames.len - 1),
+                    .static => unreachable,
+                };
+                return self.animated_frames[frame_index];
+            },
+        }
+    }
 };
 
 pub const SceneObject = struct {
@@ -126,7 +159,8 @@ pub const SceneRenderer = struct {
 
         var batch_list: std.ArrayList(SurfaceBatch) = .empty;
         errdefer {
-            for (batch_list.items) |batch| {
+            for (batch_list.items) |*batch| {
+                batch.binding.deinit(allocator);
                 rl.unloadModel(batch.model);
                 allocator.free(batch.wire_positions);
                 allocator.free(batch.material_name);
@@ -147,7 +181,12 @@ pub const SceneRenderer = struct {
             errdefer allocator.free(wire_positions);
             const material_name = try allocator.dupe(u8, batch.texture_name);
             errdefer allocator.free(material_name);
-            const texture = try texture_cache.getTextureForMaterial(batch.texture_name, 0.0);
+            const binding = try texture_cache.buildMaterialBinding(batch.texture_name);
+            errdefer {
+                var owned_binding = binding;
+                owned_binding.deinit(allocator);
+            }
+            const texture = binding.currentTexture(0.0);
             const lightmap = lightmap_cache.getTexture(batch.lightmap_index);
             if (texture_cache.was_missing_last_load) {
                 stats.missing_texture_count += 1;
@@ -157,6 +196,7 @@ pub const SceneRenderer = struct {
             model.materials[0].maps[@intFromEnum(rl.MATERIAL_MAP_DIFFUSE)].texture = texture;
             model.materials[0].maps[@intFromEnum(rl.MaterialMapIndex.emission)].texture = lightmap;
             try batch_list.append(allocator, .{
+                .binding = binding,
                 .model = model,
                 .wire_positions = wire_positions,
                 .material_name = material_name,
@@ -183,7 +223,8 @@ pub const SceneRenderer = struct {
     }
 
     pub fn deinit(self: *SceneRenderer) void {
-        for (self.batches) |batch| {
+        for (self.batches) |*batch| {
+            batch.binding.deinit(self.allocator);
             rl.unloadModel(batch.model);
             self.allocator.free(batch.wire_positions);
             self.allocator.free(batch.material_name);
@@ -303,7 +344,7 @@ pub const SceneRenderer = struct {
             rl.setShaderValue(self.lightmap_shader, self.lightmap_scale_loc, &lightmap_scale, .float);
             rl.setShaderValue(self.lightmap_shader, self.alpha_cutoff_loc, &batch.alpha_cutoff, .float);
 
-            const texture = self.texture_cache.getTextureForMaterial(batch.material_name, time_seconds) catch self.texture_cache.placeholder;
+            const texture = batch.binding.currentTexture(time_seconds);
             batch.model.materials[0].maps[@intFromEnum(rl.MATERIAL_MAP_DIFFUSE)].texture = texture;
 
             if (!self.backface_culling or batch.double_sided) {
@@ -460,6 +501,63 @@ const TextureCache = struct {
 
         self.was_missing_last_load = true;
         return self.placeholder;
+    }
+
+    pub fn buildMaterialBinding(self: *TextureCache, material_name: []const u8) !MaterialBinding {
+        self.was_missing_last_load = false;
+
+        if (self.shaders.get(material_name)) |definition| {
+            for (definition.stages) |stage| {
+                switch (stage.map_kind) {
+                    .animmap, .oneshotanimmap => {
+                        if (stage.anim_frames.len == 0) continue;
+
+                        const frames = try self.allocator.alloc(rl.Texture2D, stage.anim_frames.len);
+                        errdefer self.allocator.free(frames);
+
+                        for (stage.anim_frames, 0..) |frame_name, frame_index| {
+                            const texture = try self.tryLoadResolvedTexture(frame_name) orelse self.placeholder;
+                            if (texture.id == self.placeholder.id) self.was_missing_last_load = true;
+                            frames[frame_index] = texture;
+                        }
+
+                        return .{
+                            .mode = if (stage.map_kind == .oneshotanimmap) .animated_once else .animated_loop,
+                            .static_texture = frames[0],
+                            .animated_frames = frames,
+                            .fps = stage.fps,
+                        };
+                    },
+                    .map, .clampmap => {
+                        if (stage.texture) |texture_name| {
+                            const texture = try self.tryLoadResolvedTexture(texture_name) orelse self.placeholder;
+                            if (texture.id == self.placeholder.id) self.was_missing_last_load = true;
+                            return .{
+                                .mode = .static,
+                                .static_texture = texture,
+                            };
+                        }
+                    },
+                    .lightmap => {},
+                }
+            }
+
+            if (definition.editor_image) |editor_image| {
+                const texture = try self.tryLoadResolvedTexture(editor_image) orelse self.placeholder;
+                if (texture.id == self.placeholder.id) self.was_missing_last_load = true;
+                return .{
+                    .mode = .static,
+                    .static_texture = texture,
+                };
+            }
+        }
+
+        const texture = try self.tryLoadResolvedTexture(material_name) orelse self.placeholder;
+        if (texture.id == self.placeholder.id) self.was_missing_last_load = true;
+        return .{
+            .mode = .static,
+            .static_texture = texture,
+        };
     }
 
     pub fn getMaterialRule(self: *const TextureCache, texture_name: []const u8) MaterialRule {
