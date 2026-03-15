@@ -488,8 +488,8 @@ const CollisionDebugState = struct {
 };
 
 const collision_trace_lengths = [_]f32{ 256.0, 512.0, 1024.0, 2048.0, 4096.0 };
-const collision_box_mins = q3.math.Vec3{ .x = -16.0, .y = -16.0, .z = -24.0 };
-const collision_box_maxs = q3.math.Vec3{ .x = 16.0, .y = 16.0, .z = 32.0 };
+const collision_box_mins = q3.math.Vec3{ .x = -16.0, .y = -24.0, .z = -16.0 };
+const collision_box_maxs = q3.math.Vec3{ .x = 16.0, .y = 32.0, .z = 16.0 };
 
 fn updateCollisionDebugState(
     state: *CollisionDebugState,
@@ -668,14 +668,16 @@ fn drawCollisionDebug(state: *const CollisionDebugState) void {
     rl.drawLine3D(start, actual_end, if (trace.result.hit) .orange else .green);
 
     if (state.use_box_trace) {
+        const box_center = toRlVector3(addVec3(trace.result.end_position, collisionBoxCenterOffset()));
+        const box_size = collisionBoxSize();
         const distance_sq =
             (trace.result.end_position.x - trace.start.x) * (trace.result.end_position.x - trace.start.x) +
             (trace.result.end_position.y - trace.start.y) * (trace.result.end_position.y - trace.start.y) +
             (trace.result.end_position.z - trace.start.z) * (trace.result.end_position.z - trace.start.z);
         if (trace.result.start_solid or distance_sq < 1.0) {
-            rl.drawSphereWires(actual_end, 12.0, 8, 8, .orange);
+            rl.drawSphereWires(box_center, 12.0, 8, 8, .orange);
         } else {
-            rl.drawCubeWiresV(actual_end, .{ .x = 32.0, .y = 56.0, .z = 32.0 }, if (trace.result.hit) .orange else .green);
+            rl.drawCubeWiresV(box_center, box_size, if (trace.result.hit) .orange else .green);
         }
     }
 
@@ -703,5 +705,21 @@ fn scaleVec3(v: q3.math.Vec3, amount: f32) q3.math.Vec3 {
         .x = v.x * amount,
         .y = v.y * amount,
         .z = v.z * amount,
+    };
+}
+
+fn collisionBoxCenterOffset() q3.math.Vec3 {
+    return .{
+        .x = (collision_box_mins.x + collision_box_maxs.x) * 0.5,
+        .y = (collision_box_mins.y + collision_box_maxs.y) * 0.5,
+        .z = (collision_box_mins.z + collision_box_maxs.z) * 0.5,
+    };
+}
+
+fn collisionBoxSize() rl.Vector3 {
+    return .{
+        .x = collision_box_maxs.x - collision_box_mins.x,
+        .y = collision_box_maxs.y - collision_box_mins.y,
+        .z = collision_box_maxs.z - collision_box_mins.z,
     };
 }
