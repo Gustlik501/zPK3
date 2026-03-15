@@ -89,7 +89,7 @@ pub fn run(allocator: std.mem.Allocator) !void {
 
         const world_draw_start_ns = std.time.nanoTimestamp();
         rl.beginMode3D(camera);
-        renderer.draw();
+        renderer.draw(camera);
         drawCollisionDebug(&inspector.collision);
         rl.endMode3D();
         const world_draw_end_ns = std.time.nanoTimestamp();
@@ -389,6 +389,7 @@ fn drawInspector(
     _ = imgui.checkbox("Draw world geometry", &renderer.draw_world_geometry);
     _ = imgui.checkbox("Draw submodel geometry", &renderer.draw_submodel_geometry);
     _ = imgui.checkbox("Isolate selected BSP submodel", &renderer.isolate_selected_submodel);
+    _ = imgui.checkbox("PVS visibility culling", &renderer.visibility_culling);
     _ = imgui.checkbox("Wireframe renderer", &renderer.draw_wireframe);
     _ = imgui.checkbox("Fullbright renderer", &renderer.fullbright);
     _ = imgui.checkbox("Backface culling", &renderer.backface_culling);
@@ -564,6 +565,7 @@ fn drawRuntimeStatsWindow(
     var geom_mem_buf: [32]u8 = undefined;
     var wire_mem_buf: [32]u8 = undefined;
     var material_mem_buf: [32]u8 = undefined;
+    var visibility_mem_buf: [32]u8 = undefined;
     var total_mem_buf: [32]u8 = undefined;
     var bsp_mem_buf: [32]u8 = undefined;
     var entity_mem_buf: [32]u8 = undefined;
@@ -655,13 +657,27 @@ fn drawRuntimeStatsWindow(
     ) catch return;
     imgui.text(scene_line);
 
+    const visibility_line = std.fmt.bufPrintZ(
+        &line_buf,
+        "Visibility: pvs={s}  camera leaf={s}  cluster={d}  world visible={d}  world culled={d}",
+        .{
+            if (renderer.visibility_culling) "on" else "off",
+            if (renderer.last_camera_leaf_index != null) "yes" else "no",
+            renderer.last_camera_cluster,
+            renderer.stats.pvs_visible_world_batch_count,
+            renderer.stats.pvs_culled_world_batch_count,
+        },
+    ) catch return;
+    imgui.text(visibility_line);
+
     const memory_line = std.fmt.bufPrintZ(
         &line_buf,
-        "CPU est: geom {s}  wire {s}  materials {s}  total tracked {s}",
+        "CPU est: geom {s}  wire {s}  materials {s}  vis {s}  total tracked {s}",
         .{
             formatMemorySizeZ(&geom_mem_buf, renderer.stats.geometry_memory_bytes),
             formatMemorySizeZ(&wire_mem_buf, renderer.stats.wireframe_memory_bytes),
             formatMemorySizeZ(&material_mem_buf, renderer.stats.material_memory_bytes),
+            formatMemorySizeZ(&visibility_mem_buf, renderer.stats.visibility_memory_bytes),
             formatMemorySizeZ(&total_mem_buf, total_tracked_bytes),
         },
     ) catch return;
@@ -744,6 +760,7 @@ fn totalTrackedBytes(
     return renderer.stats.geometry_memory_bytes +
         renderer.stats.wireframe_memory_bytes +
         renderer.stats.material_memory_bytes +
+        renderer.stats.visibility_memory_bytes +
         renderer.stats.texture_memory_bytes +
         renderer.stats.lightmap_memory_bytes +
         map.estimatedMemoryBytes() +
@@ -825,7 +842,17 @@ fn dumpStatsReport(
         },
     );
     std.debug.print(
-        "tracked_bytes: total={d} bsp={d} entities={d} collision={d} scene_objects={d} cache_meta={d} geometry={d} wireframe={d} materials={d} textures={d} lightmaps={d}\n",
+        "visibility: enabled={s} camera_leaf={?d} camera_cluster={d} world_visible={d} world_culled={d}\n",
+        .{
+            if (renderer.visibility_culling) "true" else "false",
+            renderer.last_camera_leaf_index,
+            renderer.last_camera_cluster,
+            renderer.stats.pvs_visible_world_batch_count,
+            renderer.stats.pvs_culled_world_batch_count,
+        },
+    );
+    std.debug.print(
+        "tracked_bytes: total={d} bsp={d} entities={d} collision={d} scene_objects={d} cache_meta={d} geometry={d} wireframe={d} materials={d} visibility={d} textures={d} lightmaps={d}\n",
         .{
             tracked_total,
             bsp_bytes,
@@ -836,6 +863,7 @@ fn dumpStatsReport(
             renderer.stats.geometry_memory_bytes,
             renderer.stats.wireframe_memory_bytes,
             renderer.stats.material_memory_bytes,
+            renderer.stats.visibility_memory_bytes,
             renderer.stats.texture_memory_bytes,
             renderer.stats.lightmap_memory_bytes,
         },

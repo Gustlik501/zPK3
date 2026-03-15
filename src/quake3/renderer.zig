@@ -68,6 +68,7 @@ const SurfaceBatch = struct {
     use_lightmap: bool,
     double_sided: bool,
     alpha_cutoff: f32,
+    visible_clusters: []u8,
 };
 
 const MaterialBinding = struct {
@@ -125,6 +126,7 @@ pub const SceneRenderer = struct {
     batches: []SurfaceBatch,
     scene_objects: []SceneObject,
     stats: SceneStats,
+    map: *const bsp.Map,
     texture_cache: TextureCache,
     lightmap_cache: LightmapCache,
     lightmap_shader: rl.Shader,
@@ -134,11 +136,14 @@ pub const SceneRenderer = struct {
     draw_wireframe: bool = false,
     fullbright: bool = false,
     backface_culling: bool = true,
+    visibility_culling: bool = true,
     draw_scene_objects: bool = true,
     draw_world_geometry: bool = true,
     draw_submodel_geometry: bool = true,
     isolate_selected_submodel: bool = false,
     selected_scene_object_index: ?usize = null,
+    last_camera_leaf_index: ?usize = null,
+    last_camera_cluster: i32 = -1,
 
     pub fn init(allocator: std.mem.Allocator, packs: *archive.Pk3Collection, map: *const bsp.Map) !SceneRenderer {
         var texture_cache = try TextureCache.init(allocator, packs);
@@ -160,6 +165,7 @@ pub const SceneRenderer = struct {
             for (batch_list.items) |*batch| {
                 batch.binding.deinit(allocator);
                 rl.unloadModel(batch.model);
+                allocator.free(batch.visible_clusters);
             }
             batch_list.deinit(allocator);
         }
@@ -188,10 +194,13 @@ pub const SceneRenderer = struct {
             }
 
             stats.geometry_memory_bytes += batchMemoryBytes(batch);
+            stats.visibility_memory_bytes += batch.visible_clusters.len;
             stats.material_memory_bytes += bindingMemoryBytes(binding);
 
             const freed_cpu_mesh_bytes = discardCpuMeshData(&model);
             stats.geometry_memory_bytes -|= freed_cpu_mesh_bytes;
+            const visible_clusters = try allocator.dupe(u8, batch.visible_clusters);
+            errdefer allocator.free(visible_clusters);
 
             model.materials[0].shader = lightmap_shader;
             model.materials[0].maps[@intFromEnum(rl.MATERIAL_MAP_DIFFUSE)].texture = texture;
@@ -204,6 +213,7 @@ pub const SceneRenderer = struct {
                 .use_lightmap = batch.use_lightmap,
                 .double_sided = batch.double_sided,
                 .alpha_cutoff = batch.alpha_cutoff,
+                .visible_clusters = visible_clusters,
             });
         }
 
@@ -217,6 +227,7 @@ pub const SceneRenderer = struct {
             .batches = try batch_list.toOwnedSlice(allocator),
             .scene_objects = scene_objects,
             .stats = stats,
+            .map = map,
             .texture_cache = texture_cache,
             .lightmap_cache = lightmap_cache,
             .lightmap_shader = lightmap_shader,
@@ -230,6 +241,7 @@ pub const SceneRenderer = struct {
         for (self.batches) |*batch| {
             batch.binding.deinit(self.allocator);
             rl.unloadModel(batch.model);
+            self.allocator.free(batch.visible_clusters);
         }
         self.allocator.free(self.batches);
         for (self.scene_objects) |*object| object.deinit(self.allocator);
@@ -240,7 +252,7 @@ pub const SceneRenderer = struct {
         self.* = undefined;
     }
 
-    pub fn draw(self: *SceneRenderer) void {
+    pub fn draw(self: *SceneRenderer, camera: rl.Camera) void {
         if (rl.isKeyPressed(.f1)) {
             self.draw_wireframe = !self.draw_wireframe;
         }
@@ -268,6 +280,9 @@ pub const SceneRenderer = struct {
 
         self.stats.drawn_batch_count = 0;
         self.stats.drawn_vertex_count = 0;
+        self.stats.pvs_visible_world_batch_count = 0;
+        self.stats.pvs_culled_world_batch_count = 0;
+        self.updateVisibilityState(camera.position);
 
         self.drawBatches(.solid);
         self.drawBatches(.alpha);
@@ -335,6 +350,47 @@ pub const SceneRenderer = struct {
         return self.texture_cache.metadataMemoryBytes() + self.lightmap_cache.metadataMemoryBytes();
     }
 
+    fn updateVisibilityState(self: *SceneRenderer, camera_position: rl.Vector3) void {
+        self.last_camera_leaf_index = self.map.findLeafIndex(.{
+            .x = camera_position.x,
+            .y = camera_position.y,
+            .z = camera_position.z,
+        });
+        self.last_camera_cluster = if (self.last_camera_leaf_index) |leaf_index|
+            self.map.leaves[leaf_index].cluster
+        else
+            -1;
+    }
+
+    fn isBatchVisible(self: *SceneRenderer, batch: *const SurfaceBatch) bool {
+        if (!self.visibility_culling) return true;
+        if (batch.owner_bsp_model_index != 0) return true;
+        if (self.map.visdata == null or batch.visible_clusters.len == 0) return true;
+
+        const camera_cluster = self.last_camera_cluster;
+        if (camera_cluster < 0) return true;
+        const camera_cluster_index: usize = @intCast(camera_cluster);
+
+        if (camera_cluster_index / 8 < batch.visible_clusters.len) {
+            const mask: u8 = @as(u8, 1) << @intCast(camera_cluster_index & 7);
+            if ((batch.visible_clusters[camera_cluster_index / 8] & mask) != 0) return true;
+        }
+
+        for (batch.visible_clusters, 0..) |byte, byte_index| {
+            if (byte == 0) continue;
+            var bit: usize = 0;
+            while (bit < 8) : (bit += 1) {
+                const mask: u8 = @as(u8, 1) << @intCast(bit);
+                if ((byte & mask) == 0) continue;
+
+                const cluster_index = byte_index * 8 + bit;
+                if (self.map.isClusterVisible(camera_cluster, @intCast(cluster_index))) return true;
+            }
+        }
+
+        return false;
+    }
+
     fn drawBatches(self: *SceneRenderer, mode: RenderMode) void {
         switch (mode) {
             .solid => {},
@@ -351,10 +407,19 @@ pub const SceneRenderer = struct {
             if (batch.render_mode != mode) continue;
             if (batch.owner_bsp_model_index == 0 and !self.draw_world_geometry) continue;
             if (batch.owner_bsp_model_index != 0 and !self.draw_submodel_geometry) continue;
+            if (!self.isBatchVisible(batch)) {
+                if (batch.owner_bsp_model_index == 0) {
+                    self.stats.pvs_culled_world_batch_count += 1;
+                }
+                continue;
+            }
             if (self.isolate_selected_submodel) {
                 if (self.selectedBspModelIndex()) |model_index| {
                     if (batch.owner_bsp_model_index != model_index) continue;
                 }
+            }
+            if (batch.owner_bsp_model_index == 0) {
+                self.stats.pvs_visible_world_batch_count += 1;
             }
 
             const use_lightmap: i32 = if (self.fullbright or self.draw_wireframe or !batch.use_lightmap) 0 else 1;

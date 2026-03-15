@@ -20,8 +20,11 @@ pub const SceneStats = struct {
     geometry_memory_bytes: usize = 0,
     wireframe_memory_bytes: usize = 0,
     material_memory_bytes: usize = 0,
+    visibility_memory_bytes: usize = 0,
     texture_memory_bytes: usize = 0,
     lightmap_memory_bytes: usize = 0,
+    pvs_visible_world_batch_count: usize = 0,
+    pvs_culled_world_batch_count: usize = 0,
 };
 
 pub const RenderMode = enum {
@@ -46,6 +49,7 @@ pub const SurfaceBatch = struct {
     use_lightmap: bool,
     double_sided: bool,
     alpha_cutoff: f32,
+    visible_clusters: []u8,
     positions: []f32,
     texcoords: []f32,
     texcoords2: []f32,
@@ -55,6 +59,7 @@ pub const SurfaceBatch = struct {
 
     pub fn deinit(self: *SurfaceBatch, allocator: std.mem.Allocator) void {
         allocator.free(self.texture_name);
+        allocator.free(self.visible_clusters);
         allocator.free(self.positions);
         allocator.free(self.texcoords);
         allocator.free(self.texcoords2);
@@ -102,6 +107,8 @@ pub const Scene = struct {
 
         const face_owner_models = try collectFaceOwnerModels(allocator, map);
         defer allocator.free(face_owner_models);
+        var face_cluster_info = try collectFaceClusterInfo(allocator, map);
+        defer face_cluster_info.deinit(allocator);
 
         var stats: SceneStats = .{};
 
@@ -116,7 +123,9 @@ pub const Scene = struct {
                 .texture_name = texture_name,
                 .lightmap_index = if (rule.use_lightmap) face.lightmap_index else -1,
                 .rule = rule,
+                .cluster_vector_bytes = face_cluster_info.bytes_per_face,
             });
+            builder.includeFaceClusters(face_cluster_info, face_index);
 
             switch (face.face_type) {
                 1 => try builder.appendMeshFace(map, face, true),
@@ -178,6 +187,7 @@ const BatchKey = struct {
     texture_name: []const u8,
     lightmap_index: i32,
     rule: MaterialRule,
+    cluster_vector_bytes: usize,
 };
 
 fn getOrCreateBuilder(
@@ -192,7 +202,8 @@ fn getOrCreateBuilder(
             builder.rule.render_mode == key.rule.render_mode and
             builder.rule.use_lightmap == key.rule.use_lightmap and
             builder.rule.double_sided == key.rule.double_sided and
-            builder.rule.alpha_cutoff == key.rule.alpha_cutoff)
+            builder.rule.alpha_cutoff == key.rule.alpha_cutoff and
+            builder.visible_clusters.len == key.cluster_vector_bytes)
         {
             return builder;
         }
@@ -204,6 +215,7 @@ fn getOrCreateBuilder(
         key.texture_name,
         key.lightmap_index,
         key.rule,
+        key.cluster_vector_bytes,
     ));
     return &builders.items[builders.items.len - 1];
 }
@@ -214,6 +226,7 @@ const MeshBuilder = struct {
     texture_name: []const u8,
     lightmap_index: i32,
     rule: MaterialRule,
+    visible_clusters: []u8,
     positions: std.ArrayList(f32),
     texcoords: std.ArrayList(f32),
     texcoords2: std.ArrayList(f32),
@@ -227,13 +240,22 @@ const MeshBuilder = struct {
         texture_name: []const u8,
         lightmap_index: i32,
         rule: MaterialRule,
+        cluster_vector_bytes: usize,
     ) !MeshBuilder {
+        const visible_clusters = if (cluster_vector_bytes == 0)
+            try allocator.alloc(u8, 0)
+        else blk: {
+            const bytes = try allocator.alloc(u8, cluster_vector_bytes);
+            @memset(bytes, 0);
+            break :blk bytes;
+        };
         return .{
             .allocator = allocator,
             .owner_bsp_model_index = owner_bsp_model_index,
             .texture_name = try allocator.dupe(u8, texture_name),
             .lightmap_index = lightmap_index,
             .rule = rule,
+            .visible_clusters = visible_clusters,
             .positions = .empty,
             .texcoords = .empty,
             .texcoords2 = .empty,
@@ -246,11 +268,21 @@ const MeshBuilder = struct {
         if (self.texture_name.len != 0) {
             self.allocator.free(self.texture_name);
         }
+        self.allocator.free(self.visible_clusters);
         self.positions.deinit(self.allocator);
         self.texcoords.deinit(self.allocator);
         self.texcoords2.deinit(self.allocator);
         self.normals.deinit(self.allocator);
         self.colors.deinit(self.allocator);
+    }
+
+    fn includeFaceClusters(self: *MeshBuilder, info: FaceClusterInfo, face_index: usize) void {
+        if (self.visible_clusters.len == 0 or face_index >= info.face_count) return;
+        const start = face_index * info.bytes_per_face;
+        const src = info.bytes[start .. start + info.bytes_per_face];
+        for (self.visible_clusters, src) |*dst, value| {
+            dst.* |= value;
+        }
     }
 
     fn appendMeshFace(self: *MeshBuilder, map: *const bsp.Map, face: bsp.Face, preferred_reverse_winding: bool) !void {
@@ -432,6 +464,9 @@ const MeshBuilder = struct {
         const texture_name = self.texture_name;
         self.texture_name = "";
         errdefer allocator.free(texture_name);
+        const visible_clusters = self.visible_clusters;
+        self.visible_clusters = try allocator.alloc(u8, 0);
+        errdefer allocator.free(visible_clusters);
 
         const positions = try self.positions.toOwnedSlice(allocator);
         errdefer allocator.free(positions);
@@ -456,6 +491,7 @@ const MeshBuilder = struct {
             .use_lightmap = self.rule.use_lightmap,
             .double_sided = self.rule.double_sided,
             .alpha_cutoff = self.rule.alpha_cutoff,
+            .visible_clusters = visible_clusters,
             .positions = positions,
             .texcoords = texcoords,
             .texcoords2 = texcoords2,
@@ -473,6 +509,63 @@ const SampledVertex = struct {
     normal: [3]f32,
     color: [4]u8,
 };
+
+const FaceClusterInfo = struct {
+    bytes_per_face: usize,
+    face_count: usize,
+    bytes: []u8,
+
+    fn deinit(self: *FaceClusterInfo, allocator: std.mem.Allocator) void {
+        allocator.free(self.bytes);
+        self.* = undefined;
+    }
+};
+
+fn collectFaceClusterInfo(allocator: std.mem.Allocator, map: *const bsp.Map) !FaceClusterInfo {
+    const visdata = map.visdata orelse return .{
+        .bytes_per_face = 0,
+        .face_count = map.faces.len,
+        .bytes = try allocator.alloc(u8, 0),
+    };
+    if (visdata.bytes_per_vector == 0 or map.faces.len == 0) {
+        return .{
+            .bytes_per_face = 0,
+            .face_count = map.faces.len,
+            .bytes = try allocator.alloc(u8, 0),
+        };
+    }
+
+    const total_bytes = map.faces.len * visdata.bytes_per_vector;
+    const bytes = try allocator.alloc(u8, total_bytes);
+    @memset(bytes, 0);
+
+    for (map.leaves) |leaf| {
+        if (leaf.cluster < 0 or leaf.leafsurface_index < 0 or leaf.leafsurface_count <= 0) continue;
+        const cluster_index: usize = @intCast(leaf.cluster);
+        if (cluster_index >= visdata.vector_count) continue;
+
+        const surface_start: usize = @intCast(leaf.leafsurface_index);
+        const surface_count: usize = @intCast(leaf.leafsurface_count);
+        if (surface_start + surface_count > map.leafsurfaces.len) continue;
+
+        for (map.leafsurfaces[surface_start .. surface_start + surface_count]) |face_index_i32| {
+            if (face_index_i32 < 0) continue;
+            const face_index: usize = @intCast(face_index_i32);
+            if (face_index >= map.faces.len) continue;
+
+            const face_bytes = bytes[face_index * visdata.bytes_per_vector .. (face_index + 1) * visdata.bytes_per_vector];
+            const byte_index = cluster_index / 8;
+            if (byte_index >= face_bytes.len) continue;
+            face_bytes[byte_index] |= @as(u8, 1) << @intCast(cluster_index & 7);
+        }
+    }
+
+    return .{
+        .bytes_per_face = visdata.bytes_per_vector,
+        .face_count = map.faces.len,
+        .bytes = bytes,
+    };
+}
 
 fn samplePatch(control: [3][3]bsp.Vertex, u: f32, v: f32) SampledVertex {
     const wu = quadraticWeights(u);

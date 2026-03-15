@@ -297,6 +297,49 @@ pub const Map = struct {
         return entities.parse(allocator, self.entities_source);
     }
 
+    pub fn findLeafIndex(self: *const Map, position: qmath.Vec3) ?usize {
+        if (self.leaves.len == 0) return null;
+        if (self.nodes.len == 0) return 0;
+
+        const map_position = toMapSpace(position);
+        var node_index: i32 = 0;
+
+        while (node_index >= 0) {
+            const index: usize = @intCast(node_index);
+            if (index >= self.nodes.len) return null;
+
+            const node = self.nodes[index];
+            if (node.plane < 0) return null;
+            const plane_index: usize = @intCast(node.plane);
+            if (plane_index >= self.planes.len) return null;
+
+            const plane = self.planes[plane_index];
+            const distance = dot3(plane.normal, map_position) - plane.distance;
+            node_index = if (distance >= 0.0) node.children[0] else node.children[1];
+        }
+
+        const leaf_index = -node_index - 1;
+        if (leaf_index < 0) return null;
+        const index: usize = @intCast(leaf_index);
+        if (index >= self.leaves.len) return null;
+        return index;
+    }
+
+    pub fn isClusterVisible(self: *const Map, from_cluster: i32, to_cluster: i32) bool {
+        if (self.visdata == null) return true;
+        if (from_cluster < 0 or to_cluster < 0) return true;
+
+        const visdata = self.visdata.?;
+        const from_index: usize = @intCast(from_cluster);
+        const to_index: usize = @intCast(to_cluster);
+        const cluster_bytes = visdata.clusterBytes(from_index) orelse return true;
+        if (to_index / 8 >= cluster_bytes.len) return false;
+
+        const byte = cluster_bytes[to_index / 8];
+        const mask: u8 = @as(u8, 1) << @intCast(to_index & 7);
+        return (byte & mask) != 0;
+    }
+
     pub fn estimatedMemoryBytes(self: *const Map) usize {
         var total: usize = @sizeOf(Map);
         total += self.path.len;
@@ -734,6 +777,10 @@ pub fn toMapSpace(position: qmath.Vec3) [3]f32 {
         -position.z,
         position.y,
     };
+}
+
+fn dot3(a: [3]f32, b: [3]f32) f32 {
+    return a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
 }
 
 fn normalizePathInPlace(path: []u8) void {
