@@ -380,6 +380,7 @@ const FrameProfiler = struct {
     cpu_frame: FrameMetric = .{},
     present_wait: FrameMetric = .{},
     total_frame: FrameMetric = .{},
+    process_memory: ProcessMemoryStats = .{},
 
     fn record(self: *FrameProfiler, sample: FrameSample) void {
         self.input.record(sample.input_ns);
@@ -390,6 +391,29 @@ const FrameProfiler = struct {
         self.cpu_frame.record(sample.cpu_frame_ns);
         self.present_wait.record(sample.present_wait_ns);
         self.total_frame.record(sample.total_frame_ns);
+        self.process_memory.refresh();
+    }
+};
+
+const ProcessMemoryStats = struct {
+    rss_bytes: ?usize = null,
+    virtual_bytes: ?usize = null,
+    last_refresh_ms: i64 = 0,
+
+    fn refresh(self: *ProcessMemoryStats) void {
+        const now_ms = std.time.milliTimestamp();
+        if (now_ms - self.last_refresh_ms < 250) return;
+        self.last_refresh_ms = now_ms;
+
+        var buffer: [16 * 1024]u8 = undefined;
+        const data = readProcSelfStatus(&buffer) catch {
+            self.rss_bytes = null;
+            self.virtual_bytes = null;
+            return;
+        };
+
+        self.rss_bytes = parseProcStatusKiB(data, "VmRSS:");
+        self.virtual_bytes = parseProcStatusKiB(data, "VmSize:");
     }
 };
 
@@ -415,6 +439,15 @@ fn drawRuntimeStatsWindow(
     var wire_mem_buf: [32]u8 = undefined;
     var material_mem_buf: [32]u8 = undefined;
     var total_mem_buf: [32]u8 = undefined;
+    var rss_mem_buf: [32]u8 = undefined;
+    var vmem_mem_buf: [32]u8 = undefined;
+    var untracked_mem_buf: [32]u8 = undefined;
+    const total_tracked_bytes =
+        renderer.stats.geometry_memory_bytes +
+        renderer.stats.wireframe_memory_bytes +
+        renderer.stats.material_memory_bytes +
+        renderer.stats.texture_memory_bytes +
+        renderer.stats.lightmap_memory_bytes;
     const frame_line = std.fmt.bufPrintZ(
         &line_buf,
         "FPS {d}  frame {d:.2} ms  CPU {d:.2} ms  present {d:.2} ms",
@@ -495,17 +528,25 @@ fn drawRuntimeStatsWindow(
             formatMemorySizeZ(&geom_mem_buf, renderer.stats.geometry_memory_bytes),
             formatMemorySizeZ(&wire_mem_buf, renderer.stats.wireframe_memory_bytes),
             formatMemorySizeZ(&material_mem_buf, renderer.stats.material_memory_bytes),
-            formatMemorySizeZ(
-                &total_mem_buf,
-                renderer.stats.geometry_memory_bytes +
-                    renderer.stats.wireframe_memory_bytes +
-                    renderer.stats.material_memory_bytes +
-                    renderer.stats.texture_memory_bytes +
-                    renderer.stats.lightmap_memory_bytes,
-            ),
+            formatMemorySizeZ(&total_mem_buf, total_tracked_bytes),
         },
     ) catch return;
     imgui.text(memory_line);
+
+    if (profiler.process_memory.rss_bytes) |rss_bytes| {
+        const process_line = std.fmt.bufPrintZ(
+            &line_buf,
+            "Process: RSS {s}  VmSize {s}  Untracked gap {s}",
+            .{
+                formatMemorySizeZ(&rss_mem_buf, rss_bytes),
+                formatMemorySizeZ(&vmem_mem_buf, profiler.process_memory.virtual_bytes orelse 0),
+                formatMemorySizeZ(&untracked_mem_buf, rss_bytes -| total_tracked_bytes),
+            },
+        ) catch return;
+        imgui.text(process_line);
+    } else {
+        imgui.text("Process: RSS unavailable on this platform/runtime.");
+    }
 
     const toggle_line = std.fmt.bufPrintZ(
         &line_buf,
@@ -912,4 +953,25 @@ fn formatMemorySizeZ(buffer: []u8, bytes: usize) [:0]const u8 {
         return std.fmt.bufPrintZ(buffer, "{d:.1} KiB", .{value / kib}) catch "n/a";
     }
     return std.fmt.bufPrintZ(buffer, "{d} B", .{bytes}) catch "n/a";
+}
+
+fn readProcSelfStatus(buffer: []u8) ![]const u8 {
+    var file = try std.fs.openFileAbsolute("/proc/self/status", .{ .mode = .read_only });
+    defer file.close();
+
+    const read_len = try file.readAll(buffer);
+    return buffer[0..read_len];
+}
+
+fn parseProcStatusKiB(data: []const u8, label: []const u8) ?usize {
+    var lines = std.mem.splitScalar(u8, data, '\n');
+    while (lines.next()) |line| {
+        if (!std.mem.startsWith(u8, line, label)) continue;
+
+        var tokens = std.mem.tokenizeAny(u8, line[label.len..], " \t\r");
+        const value_text = tokens.next() orelse return null;
+        const value_kib = std.fmt.parseInt(usize, value_text, 10) catch return null;
+        return value_kib * 1024;
+    }
+    return null;
 }
