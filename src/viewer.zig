@@ -181,8 +181,8 @@ fn drawOverlay(
     entity_count: usize,
     validation_issue_count: usize,
 ) void {
-    rl.drawRectangle(12, 12, 520, 148, rl.fade(.black, 0.72));
-    rl.drawRectangleLines(12, 12, 520, 148, .dark_gray);
+    rl.drawRectangle(12, 12, 520, 170, rl.fade(.black, 0.72));
+    rl.drawRectangleLines(12, 12, 520, 170, .dark_gray);
     rl.drawText("Modular Quake 3 PK3 viewer", 24, 24, 24, .ray_white);
 
     var line_buf: [256]u8 = undefined;
@@ -207,5 +207,12 @@ fn drawOverlay(
     ) catch return;
     rl.drawText(runtime_line, 24, 122, 18, if (validation_issue_count == 0) .light_gray else .orange);
 
-    rl.drawText("Controls: RMB look, WASD fly, E/Q up-down, Shift boost, wheel FOV, F1 wire, F2 fullbright, F3 cull", 24, 144, 18, .gray);
+    const scene_line = std.fmt.bufPrintZ(
+        &line_buf,
+        "Scene models: {d}  BSP submodels: {d}",
+        .{ stats.model_instance_count, stats.bsp_submodel_instance_count },
+    ) catch return;
+    rl.drawText(scene_line, 24, 144, 18, .light_gray);
+
+    rl.drawText("Controls: RMB look, WASD fly, E/Q up-down, Shift boost, wheel FOV, F1 wire, F2 fullbright, F3 cull", 24, 166, 18, .gray);
 }

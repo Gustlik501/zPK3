@@ -54,11 +54,11 @@ This file is a working checklist for turning this repo into a PK3/BSP-native run
 
 ## Phase 5: Scene Extraction
 
-- [ ] Introduce a backend-agnostic `scene` layer derived from BSP + entities.
+- [x] Introduce a backend-agnostic `scene` layer derived from BSP + entities.
 - [ ] Extract static world surfaces into scene batches/material references.
-- [ ] Add BSP submodel extraction.
-- [ ] Add entity-driven scene objects for `misc_model` and other common placements.
-- [ ] Keep renderer input based on scene data, not raw BSP internals.
+- [x] Add BSP submodel extraction.
+- [x] Add entity-driven scene objects for `misc_model` and other common placements.
+- [x] Keep renderer input based on scene data, not raw BSP internals.
 
 ## Phase 6: Shader / Material Runtime
 
@@ -120,4 +120,4 @@ This file is a working checklist for turning this repo into a PK3/BSP-native run
 
 ## Current Focus
 
-- [ ] Add collision debug views/tests and start extracting entity-driven scene objects and submodels.
+- [ ] Add collision debug views/tests and start rendering or inspecting extracted scene objects/submodels.

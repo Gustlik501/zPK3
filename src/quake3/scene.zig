@@ -1,5 +1,6 @@
 const std = @import("std");
 const bsp = @import("bsp.zig");
+const entities = @import("entities.zig");
 const qmath = @import("math.zig");
 
 pub const SceneStats = struct {
@@ -7,6 +8,8 @@ pub const SceneStats = struct {
     face_count: usize = 0,
     vertex_count: usize = 0,
     missing_texture_count: usize = 0,
+    model_instance_count: usize = 0,
+    bsp_submodel_instance_count: usize = 0,
 };
 
 pub const RenderMode = enum {
@@ -48,9 +51,30 @@ pub const SurfaceBatch = struct {
     }
 };
 
+pub const ModelInstanceKind = enum {
+    bsp_submodel,
+    external_model,
+};
+
+pub const ModelInstance = struct {
+    kind: ModelInstanceKind,
+    classname: []const u8,
+    model_path: ?[]const u8,
+    bsp_model_index: ?usize,
+    origin: qmath.Vec3,
+    angles: qmath.Vec3,
+
+    pub fn deinit(self: *ModelInstance, allocator: std.mem.Allocator) void {
+        allocator.free(self.classname);
+        if (self.model_path) |model_path| allocator.free(model_path);
+        self.* = undefined;
+    }
+};
+
 pub const Scene = struct {
     allocator: std.mem.Allocator,
     batches: []SurfaceBatch,
+    model_instances: []ModelInstance,
     stats: SceneStats,
 
     pub fn init(allocator: std.mem.Allocator, map: *const bsp.Map, material_provider: anytype) !Scene {
@@ -89,6 +113,12 @@ pub const Scene = struct {
             batch_list.deinit(allocator);
         }
 
+        var model_instances = try collectModelInstances(allocator, map);
+        errdefer {
+            for (model_instances.items) |*instance| instance.deinit(allocator);
+            model_instances.deinit(allocator);
+        }
+
         for (builders.items) |*builder| {
             if (builder.vertex_count == 0) continue;
             try batch_list.append(allocator, try builder.toBatch(allocator));
@@ -96,10 +126,15 @@ pub const Scene = struct {
         }
 
         stats.batch_count = batch_list.items.len;
+        stats.model_instance_count = model_instances.items.len;
+        for (model_instances.items) |instance| {
+            if (instance.kind == .bsp_submodel) stats.bsp_submodel_instance_count += 1;
+        }
 
         return .{
             .allocator = allocator,
             .batches = try batch_list.toOwnedSlice(allocator),
+            .model_instances = try model_instances.toOwnedSlice(allocator),
             .stats = stats,
         };
     }
@@ -107,6 +142,8 @@ pub const Scene = struct {
     pub fn deinit(self: *Scene) void {
         for (self.batches) |*batch| batch.deinit(self.allocator);
         self.allocator.free(self.batches);
+        for (self.model_instances) |*instance| instance.deinit(self.allocator);
+        self.allocator.free(self.model_instances);
         self.* = undefined;
     }
 };
@@ -510,4 +547,60 @@ fn shouldReverseTriangleVertices(
 
 fn shouldSkipTexture(texture_name: []const u8) bool {
     return std.mem.startsWith(u8, texture_name, "textures/common/");
+}
+
+fn collectModelInstances(allocator: std.mem.Allocator, map: *const bsp.Map) !std.ArrayList(ModelInstance) {
+    var entity_list = try map.parseEntities(allocator);
+    defer entity_list.deinit();
+
+    var instances: std.ArrayList(ModelInstance) = .empty;
+    errdefer {
+        for (instances.items) |*instance| instance.deinit(allocator);
+        instances.deinit(allocator);
+    }
+
+    for (entity_list.items) |*entity| {
+        const classname = entity.classname() orelse continue;
+        const model = entity.model() orelse continue;
+
+        if (model.len != 0 and model[0] == '*') {
+            const index = parseSubmodelIndex(model) orelse continue;
+            if (index >= map.models.len) continue;
+
+            try instances.append(allocator, .{
+                .kind = .bsp_submodel,
+                .classname = try allocator.dupe(u8, classname),
+                .model_path = null,
+                .bsp_model_index = index,
+                .origin = entity.origin() orelse .{ .x = 0.0, .y = 0.0, .z = 0.0 },
+                .angles = entityAngles(entity),
+            });
+            continue;
+        }
+
+        try instances.append(allocator, .{
+            .kind = .external_model,
+            .classname = try allocator.dupe(u8, classname),
+            .model_path = try allocator.dupe(u8, model),
+            .bsp_model_index = null,
+            .origin = entity.origin() orelse .{ .x = 0.0, .y = 0.0, .z = 0.0 },
+            .angles = entityAngles(entity),
+        });
+    }
+
+    return instances;
+}
+
+fn parseSubmodelIndex(model: []const u8) ?usize {
+    if (model.len < 2 or model[0] != '*') return null;
+    return std.fmt.parseUnsigned(usize, model[1..], 10) catch null;
+}
+
+fn entityAngles(entity: *const entities.Entity) qmath.Vec3 {
+    if (entity.angles()) |angles| return angles;
+    if (entity.get("angle")) |angle_text| {
+        const yaw = std.fmt.parseFloat(f32, angle_text) catch return .{ .x = 0.0, .y = 0.0, .z = 0.0 };
+        return .{ .x = 0.0, .y = yaw, .z = 0.0 };
+    }
+    return .{ .x = 0.0, .y = 0.0, .z = 0.0 };
 }
