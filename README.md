@@ -14,9 +14,13 @@ Modular Quake 3 BSP/PK3 viewer built with Zig and raylib.
 zig build quake3_viewer_build
 ```
 
+Build only. Does not run the viewer.
+
 ```sh
 zig build quake3_viewer
 ```
+
+Builds and runs the viewer from the project root so the default `assets/maps` path resolves correctly.
 
 Example map:
 

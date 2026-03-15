@@ -30,7 +30,7 @@ pub fn run(allocator: std.mem.Allocator) !void {
     var renderer = try q3.renderer.SceneRenderer.init(allocator, &packs, &map);
     defer renderer.deinit();
 
-    var camera = defaultCamera(map.bounds_center);
+    var camera = defaultCamera(toRlVector3(map.bounds_center));
     var controller = CameraController.init(camera);
     rl.setTargetFPS(144);
 
@@ -61,6 +61,10 @@ fn defaultCamera(center: rl.Vector3) rl.Camera {
         .fovy = 65.0,
         .projection = .perspective,
     };
+}
+
+fn toRlVector3(v: q3.math.Vec3) rl.Vector3 {
+    return .{ .x = v.x, .y = v.y, .z = v.z };
 }
 
 const CameraController = struct {

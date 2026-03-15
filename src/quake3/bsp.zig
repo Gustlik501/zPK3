@@ -1,5 +1,6 @@
 const std = @import("std");
-const rl = @import("raylib");
+const entities = @import("entities.zig");
+const qmath = @import("math.zig");
 
 pub const MapTexture = struct {
     name: []const u8,
@@ -32,18 +33,102 @@ pub const Face = struct {
     patch_size: [2]i32,
 };
 
+pub const Plane = extern struct {
+    normal: [3]f32 align(1),
+    distance: f32 align(1),
+};
+
+pub const Node = extern struct {
+    plane: i32 align(1),
+    children: [2]i32 align(1),
+    mins: [3]i32 align(1),
+    maxs: [3]i32 align(1),
+};
+
+pub const Leaf = extern struct {
+    cluster: i32 align(1),
+    area: i32 align(1),
+    mins: [3]i32 align(1),
+    maxs: [3]i32 align(1),
+    leafsurface_index: i32 align(1),
+    leafsurface_count: i32 align(1),
+    leafbrush_index: i32 align(1),
+    leafbrush_count: i32 align(1),
+};
+
+pub const Model = extern struct {
+    mins: [3]f32 align(1),
+    maxs: [3]f32 align(1),
+    face_index: i32 align(1),
+    face_count: i32 align(1),
+    brush_index: i32 align(1),
+    brush_count: i32 align(1),
+};
+
+pub const Brush = extern struct {
+    brushside_index: i32 align(1),
+    brushside_count: i32 align(1),
+    texture: i32 align(1),
+};
+
+pub const BrushSide = extern struct {
+    plane: i32 align(1),
+    texture: i32 align(1),
+};
+
+pub const Effect = struct {
+    name: []const u8,
+    brush: i32,
+    unknown: i32,
+};
+
+pub const LightVolume = extern struct {
+    ambient: [3]u8 align(1),
+    directional: [3]u8 align(1),
+    direction: [2]u8 align(1),
+};
+
+pub const VisData = struct {
+    vector_count: usize,
+    bytes_per_vector: usize,
+    bytes: []u8,
+
+    pub fn deinit(self: *VisData, allocator: std.mem.Allocator) void {
+        allocator.free(self.bytes);
+        self.* = undefined;
+    }
+
+    pub fn clusterBytes(self: *const VisData, cluster_index: usize) ?[]const u8 {
+        if (cluster_index >= self.vector_count) return null;
+        const start = cluster_index * self.bytes_per_vector;
+        return self.bytes[start .. start + self.bytes_per_vector];
+    }
+};
+
 pub const Map = struct {
     allocator: std.mem.Allocator,
     path: []const u8,
+    entities_source: []u8,
     textures: []MapTexture,
+    planes: []Plane,
+    nodes: []Node,
+    leaves: []Leaf,
+    leafsurfaces: []i32,
+    leafbrushes: []i32,
+    models: []Model,
+    brushes: []Brush,
+    brushsides: []BrushSide,
     vertices: []Vertex,
     meshverts: []i32,
+    effects: []Effect,
     faces: []Face,
     lightmap_bytes: []u8,
+    lightvols: []LightVolume,
+    visdata: ?VisData,
     lightmap_count: usize,
-    bounds_min: rl.Vector3,
-    bounds_max: rl.Vector3,
-    bounds_center: rl.Vector3,
+    bounds_min: qmath.Vec3,
+    bounds_max: qmath.Vec3,
+    bounds_center: qmath.Vec3,
 
     pub fn init(allocator: std.mem.Allocator, path: []const u8, data: []const u8) !Map {
         var reader = std.Io.Reader.fixed(data);
@@ -52,8 +137,35 @@ pub const Map = struct {
         if (!std.mem.eql(u8, &header.magic, "IBSP")) return error.InvalidMagic;
         if (header.version != 46) return error.UnsupportedVersion;
 
+        const entities_source = try parseOwnedBytes(allocator, data, header.lumps[@intFromEnum(LumpIndex.entities)], 0);
+        errdefer allocator.free(entities_source);
+
         const textures = try parseTextures(allocator, data, header.lumps[@intFromEnum(LumpIndex.textures)]);
         errdefer freeTextures(allocator, textures);
+
+        const planes = try parseStructSlice(Plane, allocator, data, header.lumps[@intFromEnum(LumpIndex.planes)]);
+        errdefer allocator.free(planes);
+
+        const nodes = try parseStructSlice(Node, allocator, data, header.lumps[@intFromEnum(LumpIndex.nodes)]);
+        errdefer allocator.free(nodes);
+
+        const leaves = try parseStructSlice(Leaf, allocator, data, header.lumps[@intFromEnum(LumpIndex.leaves)]);
+        errdefer allocator.free(leaves);
+
+        const leafsurfaces = try parseI32Slice(allocator, data, header.lumps[@intFromEnum(LumpIndex.leafsurfaces)]);
+        errdefer allocator.free(leafsurfaces);
+
+        const leafbrushes = try parseI32Slice(allocator, data, header.lumps[@intFromEnum(LumpIndex.leafbrushes)]);
+        errdefer allocator.free(leafbrushes);
+
+        const models = try parseStructSlice(Model, allocator, data, header.lumps[@intFromEnum(LumpIndex.models)]);
+        errdefer allocator.free(models);
+
+        const brushes = try parseStructSlice(Brush, allocator, data, header.lumps[@intFromEnum(LumpIndex.brushes)]);
+        errdefer allocator.free(brushes);
+
+        const brushsides = try parseStructSlice(BrushSide, allocator, data, header.lumps[@intFromEnum(LumpIndex.brushsides)]);
+        errdefer allocator.free(brushsides);
 
         const vertices = try parseVertices(allocator, data, header.lumps[@intFromEnum(LumpIndex.vertices)]);
         errdefer allocator.free(vertices);
@@ -61,22 +173,46 @@ pub const Map = struct {
         const meshverts = try parseI32Slice(allocator, data, header.lumps[@intFromEnum(LumpIndex.meshverts)]);
         errdefer allocator.free(meshverts);
 
+        const effects = try parseEffects(allocator, data, header.lumps[@intFromEnum(LumpIndex.effects)]);
+        errdefer freeEffects(allocator, effects);
+
         const faces = try parseFaces(allocator, data, header.lumps[@intFromEnum(LumpIndex.faces)]);
         errdefer allocator.free(faces);
 
         const lightmap_bytes = try parseOwnedBytes(allocator, data, header.lumps[@intFromEnum(LumpIndex.lightmaps)], lightmap_byte_len);
         errdefer allocator.free(lightmap_bytes);
 
+        const lightvols = try parseStructSlice(LightVolume, allocator, data, header.lumps[@intFromEnum(LumpIndex.lightvols)]);
+        errdefer allocator.free(lightvols);
+
+        const visdata = try parseVisData(allocator, data, header.lumps[@intFromEnum(LumpIndex.visdata)]);
+        errdefer if (visdata) |value| {
+            var owned_value = value;
+            owned_value.deinit(allocator);
+        };
+
         const bounds = computeBounds(vertices);
 
         return .{
             .allocator = allocator,
             .path = try allocator.dupe(u8, path),
+            .entities_source = entities_source,
             .textures = textures,
+            .planes = planes,
+            .nodes = nodes,
+            .leaves = leaves,
+            .leafsurfaces = leafsurfaces,
+            .leafbrushes = leafbrushes,
+            .models = models,
+            .brushes = brushes,
+            .brushsides = brushsides,
             .vertices = vertices,
             .meshverts = meshverts,
+            .effects = effects,
             .faces = faces,
             .lightmap_bytes = lightmap_bytes,
+            .lightvols = lightvols,
+            .visdata = visdata,
             .lightmap_count = lightmap_bytes.len / lightmap_byte_len,
             .bounds_min = bounds.min,
             .bounds_max = bounds.max,
@@ -89,11 +225,23 @@ pub const Map = struct {
     }
 
     pub fn deinit(self: *Map) void {
+        self.allocator.free(self.entities_source);
         freeTextures(self.allocator, self.textures);
+        self.allocator.free(self.planes);
+        self.allocator.free(self.nodes);
+        self.allocator.free(self.leaves);
+        self.allocator.free(self.leafsurfaces);
+        self.allocator.free(self.leafbrushes);
+        self.allocator.free(self.models);
+        self.allocator.free(self.brushes);
+        self.allocator.free(self.brushsides);
         self.allocator.free(self.vertices);
         self.allocator.free(self.meshverts);
+        freeEffects(self.allocator, self.effects);
         self.allocator.free(self.faces);
         self.allocator.free(self.lightmap_bytes);
+        self.allocator.free(self.lightvols);
+        if (self.visdata) |*value| value.deinit(self.allocator);
         self.allocator.free(self.path);
         self.* = undefined;
     }
@@ -101,6 +249,10 @@ pub const Map = struct {
     pub fn lightmapPixels(self: *const Map, index: usize) []const u8 {
         const start = index * lightmap_byte_len;
         return self.lightmap_bytes[start .. start + lightmap_byte_len];
+    }
+
+    pub fn parseEntities(self: *const Map, allocator: std.mem.Allocator) !entities.EntityList {
+        return entities.parse(allocator, self.entities_source);
     }
 };
 
@@ -169,6 +321,12 @@ const RawFace = extern struct {
     patch_size: [2]i32 align(1),
 };
 
+const RawEffect = extern struct {
+    name: [64]u8 align(1),
+    brush: i32 align(1),
+    unknown: i32 align(1),
+};
+
 fn parseTextures(allocator: std.mem.Allocator, data: []const u8, lump: Lump) ![]MapTexture {
     const bytes = try lumpBytes(data, lump, @sizeOf(RawTexture));
     const count = bytes.len / @sizeOf(RawTexture);
@@ -210,6 +368,18 @@ fn parseVertices(allocator: std.mem.Allocator, data: []const u8, lump: Lump) ![]
     }
 
     return vertices;
+}
+
+fn parseStructSlice(comptime T: type, allocator: std.mem.Allocator, data: []const u8, lump: Lump) ![]T {
+    const bytes = try lumpBytes(data, lump, @sizeOf(T));
+    const count = bytes.len / @sizeOf(T);
+
+    var reader = std.Io.Reader.fixed(bytes);
+    const values = try allocator.alloc(T, count);
+    for (values) |*value| {
+        value.* = try reader.takeStruct(T, .little);
+    }
+    return values;
 }
 
 fn parseI32Slice(allocator: std.mem.Allocator, data: []const u8, lump: Lump) ![]i32 {
@@ -254,6 +424,51 @@ fn parseFaces(allocator: std.mem.Allocator, data: []const u8, lump: Lump) ![]Fac
     return faces;
 }
 
+fn parseEffects(allocator: std.mem.Allocator, data: []const u8, lump: Lump) ![]Effect {
+    const bytes = try lumpBytes(data, lump, @sizeOf(RawEffect));
+    const count = bytes.len / @sizeOf(RawEffect);
+
+    var reader = std.Io.Reader.fixed(bytes);
+    const effects = try allocator.alloc(Effect, count);
+    errdefer allocator.free(effects);
+
+    for (effects) |*effect| {
+        const raw = try reader.takeStruct(RawEffect, .little);
+        const owned_name = try allocator.dupe(u8, cStringSlice(&raw.name));
+        normalizePathInPlace(owned_name);
+        effect.* = .{
+            .name = owned_name,
+            .brush = raw.brush,
+            .unknown = raw.unknown,
+        };
+    }
+
+    return effects;
+}
+
+fn parseVisData(allocator: std.mem.Allocator, data: []const u8, lump: Lump) !?VisData {
+    const bytes = try lumpBytes(data, lump, 0);
+    if (bytes.len == 0) return null;
+    if (bytes.len < 8) return error.InvalidVisData;
+
+    var reader = std.Io.Reader.fixed(bytes);
+    const raw_vector_count = try reader.takeInt(i32, .little);
+    const raw_bytes_per_vector = try reader.takeInt(i32, .little);
+    if (raw_vector_count < 0 or raw_bytes_per_vector < 0) return error.InvalidVisData;
+
+    const vector_count: usize = @intCast(raw_vector_count);
+    const bytes_per_vector: usize = @intCast(raw_bytes_per_vector);
+    const expected_bytes = try std.math.mul(usize, vector_count, bytes_per_vector);
+    const payload = bytes[@sizeOf(i32) * 2 ..];
+    if (payload.len != expected_bytes) return error.InvalidVisData;
+
+    return .{
+        .vector_count = vector_count,
+        .bytes_per_vector = bytes_per_vector,
+        .bytes = try allocator.dupe(u8, payload),
+    };
+}
+
 fn parseOwnedBytes(allocator: std.mem.Allocator, data: []const u8, lump: Lump, stride: usize) ![]u8 {
     const bytes = try lumpBytes(data, lump, stride);
     return allocator.dupe(u8, bytes);
@@ -278,9 +493,14 @@ fn freeTextures(allocator: std.mem.Allocator, textures: []MapTexture) void {
     allocator.free(textures);
 }
 
-fn computeBounds(vertices: []const Vertex) struct { min: rl.Vector3, max: rl.Vector3 } {
+fn freeEffects(allocator: std.mem.Allocator, effects: []Effect) void {
+    for (effects) |effect| allocator.free(effect.name);
+    allocator.free(effects);
+}
+
+fn computeBounds(vertices: []const Vertex) struct { min: qmath.Vec3, max: qmath.Vec3 } {
     if (vertices.len == 0) {
-        const zero = rl.Vector3{ .x = 0, .y = 0, .z = 0 };
+        const zero = qmath.Vec3{ .x = 0, .y = 0, .z = 0 };
         return .{ .min = zero, .max = zero };
     }
 
@@ -300,7 +520,7 @@ fn computeBounds(vertices: []const Vertex) struct { min: rl.Vector3, max: rl.Vec
     return .{ .min = min, .max = max };
 }
 
-pub fn toEngineSpace(position: [3]f32) rl.Vector3 {
+pub fn toEngineSpace(position: [3]f32) qmath.Vec3 {
     return .{
         .x = position[0],
         .y = position[2],
@@ -308,11 +528,19 @@ pub fn toEngineSpace(position: [3]f32) rl.Vector3 {
     };
 }
 
-pub fn toEngineNormal(normal: [3]f32) rl.Vector3 {
+pub fn toEngineNormal(normal: [3]f32) qmath.Vec3 {
     return .{
         .x = normal[0],
         .y = normal[2],
         .z = -normal[1],
+    };
+}
+
+pub fn toMapSpace(position: qmath.Vec3) [3]f32 {
+    return .{
+        position.x,
+        -position.z,
+        position.y,
     };
 }
 

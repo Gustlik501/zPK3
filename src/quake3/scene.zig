@@ -1,0 +1,513 @@
+const std = @import("std");
+const bsp = @import("bsp.zig");
+const qmath = @import("math.zig");
+
+pub const SceneStats = struct {
+    batch_count: usize = 0,
+    face_count: usize = 0,
+    vertex_count: usize = 0,
+    missing_texture_count: usize = 0,
+};
+
+pub const RenderMode = enum {
+    solid,
+    alpha,
+    additive,
+};
+
+pub const MaterialRule = struct {
+    skip: bool = false,
+    use_lightmap: bool = true,
+    render_mode: RenderMode = .solid,
+    double_sided: bool = false,
+    alpha_cutoff: f32 = 0.0,
+};
+
+pub const SurfaceBatch = struct {
+    texture_name: []const u8,
+    lightmap_index: i32,
+    render_mode: RenderMode,
+    use_lightmap: bool,
+    double_sided: bool,
+    alpha_cutoff: f32,
+    positions: []f32,
+    texcoords: []f32,
+    texcoords2: []f32,
+    normals: []f32,
+    colors: []u8,
+    vertex_count: usize,
+
+    pub fn deinit(self: *SurfaceBatch, allocator: std.mem.Allocator) void {
+        allocator.free(self.texture_name);
+        allocator.free(self.positions);
+        allocator.free(self.texcoords);
+        allocator.free(self.texcoords2);
+        allocator.free(self.normals);
+        allocator.free(self.colors);
+        self.* = undefined;
+    }
+};
+
+pub const Scene = struct {
+    allocator: std.mem.Allocator,
+    batches: []SurfaceBatch,
+    stats: SceneStats,
+
+    pub fn init(allocator: std.mem.Allocator, map: *const bsp.Map, material_provider: anytype) !Scene {
+        var builders: std.ArrayList(MeshBuilder) = .empty;
+        defer {
+            for (builders.items) |*builder| builder.deinit();
+            builders.deinit(allocator);
+        }
+
+        var stats: SceneStats = .{};
+
+        for (map.faces) |face| {
+            if (face.texture < 0 or @as(usize, @intCast(face.texture)) >= map.textures.len) continue;
+            const texture_name = map.textures[@intCast(face.texture)].name;
+            const rule = material_provider.getMaterialRule(texture_name);
+            if (rule.skip or shouldSkipTexture(texture_name)) continue;
+
+            const builder = try getOrCreateBuilder(allocator, &builders, .{
+                .texture_name = texture_name,
+                .lightmap_index = if (rule.use_lightmap) face.lightmap_index else -1,
+                .rule = rule,
+            });
+
+            switch (face.face_type) {
+                1 => try builder.appendMeshFace(map, face, true),
+                3 => try builder.appendMeshFace(map, face, false),
+                2 => try builder.appendPatchFace(map, face, 8),
+                else => continue,
+            }
+            stats.face_count += 1;
+        }
+
+        var batch_list: std.ArrayList(SurfaceBatch) = .empty;
+        errdefer {
+            for (batch_list.items) |*batch| batch.deinit(allocator);
+            batch_list.deinit(allocator);
+        }
+
+        for (builders.items) |*builder| {
+            if (builder.vertex_count == 0) continue;
+            try batch_list.append(allocator, try builder.toBatch(allocator));
+            stats.vertex_count += builder.vertex_count;
+        }
+
+        stats.batch_count = batch_list.items.len;
+
+        return .{
+            .allocator = allocator,
+            .batches = try batch_list.toOwnedSlice(allocator),
+            .stats = stats,
+        };
+    }
+
+    pub fn deinit(self: *Scene) void {
+        for (self.batches) |*batch| batch.deinit(self.allocator);
+        self.allocator.free(self.batches);
+        self.* = undefined;
+    }
+};
+
+const BatchKey = struct {
+    texture_name: []const u8,
+    lightmap_index: i32,
+    rule: MaterialRule,
+};
+
+fn getOrCreateBuilder(
+    allocator: std.mem.Allocator,
+    builders: *std.ArrayList(MeshBuilder),
+    key: BatchKey,
+) !*MeshBuilder {
+    for (builders.items) |*builder| {
+        if (builder.lightmap_index == key.lightmap_index and
+            std.mem.eql(u8, builder.texture_name, key.texture_name) and
+            builder.rule.render_mode == key.rule.render_mode and
+            builder.rule.use_lightmap == key.rule.use_lightmap and
+            builder.rule.double_sided == key.rule.double_sided and
+            builder.rule.alpha_cutoff == key.rule.alpha_cutoff)
+        {
+            return builder;
+        }
+    }
+
+    try builders.append(allocator, try MeshBuilder.init(allocator, key.texture_name, key.lightmap_index, key.rule));
+    return &builders.items[builders.items.len - 1];
+}
+
+const MeshBuilder = struct {
+    allocator: std.mem.Allocator,
+    texture_name: []const u8,
+    lightmap_index: i32,
+    rule: MaterialRule,
+    positions: std.ArrayList(f32),
+    texcoords: std.ArrayList(f32),
+    texcoords2: std.ArrayList(f32),
+    normals: std.ArrayList(f32),
+    colors: std.ArrayList(u8),
+    vertex_count: usize = 0,
+
+    fn init(allocator: std.mem.Allocator, texture_name: []const u8, lightmap_index: i32, rule: MaterialRule) !MeshBuilder {
+        return .{
+            .allocator = allocator,
+            .texture_name = try allocator.dupe(u8, texture_name),
+            .lightmap_index = lightmap_index,
+            .rule = rule,
+            .positions = .empty,
+            .texcoords = .empty,
+            .texcoords2 = .empty,
+            .normals = .empty,
+            .colors = .empty,
+        };
+    }
+
+    fn deinit(self: *MeshBuilder) void {
+        if (self.texture_name.len != 0) {
+            self.allocator.free(self.texture_name);
+        }
+        self.positions.deinit(self.allocator);
+        self.texcoords.deinit(self.allocator);
+        self.texcoords2.deinit(self.allocator);
+        self.normals.deinit(self.allocator);
+        self.colors.deinit(self.allocator);
+    }
+
+    fn appendMeshFace(self: *MeshBuilder, map: *const bsp.Map, face: bsp.Face, preferred_reverse_winding: bool) !void {
+        if (face.vertex_index < 0 or face.meshvert_index < 0) return;
+        if (face.vertex_count <= 0 or face.meshvert_count <= 0) return;
+
+        const base_vertex: usize = @intCast(face.vertex_index);
+        const vertex_count: usize = @intCast(face.vertex_count);
+        const meshvert_index: usize = @intCast(face.meshvert_index);
+        const meshvert_count: usize = @intCast(face.meshvert_count);
+
+        if (base_vertex + vertex_count > map.vertices.len) return;
+        if (meshvert_index + meshvert_count > map.meshverts.len) return;
+
+        const vertices = map.vertices[base_vertex .. base_vertex + vertex_count];
+        const meshverts = map.meshverts[meshvert_index .. meshvert_index + meshvert_count];
+
+        var tri: usize = 0;
+        while (tri + 2 < meshverts.len) : (tri += 3) {
+            const a = meshverts[tri];
+            const b = meshverts[tri + 1];
+            const c = meshverts[tri + 2];
+            if (a < 0 or b < 0 or c < 0) continue;
+
+            const ia: usize = @intCast(a);
+            const ib: usize = @intCast(b);
+            const ic: usize = @intCast(c);
+            if (ia >= vertices.len or ib >= vertices.len or ic >= vertices.len) continue;
+
+            try self.appendTriangle(vertices[ia], vertices[ib], vertices[ic], face.normal, preferred_reverse_winding);
+        }
+    }
+
+    fn appendPatchFace(self: *MeshBuilder, map: *const bsp.Map, face: bsp.Face, tessellation: usize) !void {
+        if (face.vertex_index < 0 or face.vertex_count <= 0) return;
+        if (face.patch_size[0] < 3 or face.patch_size[1] < 3) return;
+
+        const base_vertex: usize = @intCast(face.vertex_index);
+        const vertex_count: usize = @intCast(face.vertex_count);
+        if (base_vertex + vertex_count > map.vertices.len) return;
+
+        const patch_width: usize = @intCast(face.patch_size[0]);
+        const patch_height: usize = @intCast(face.patch_size[1]);
+        if (patch_width * patch_height > vertex_count) return;
+
+        const surface_vertices = map.vertices[base_vertex .. base_vertex + vertex_count];
+        const patch_cols = (patch_width - 1) / 2;
+        const patch_rows = (patch_height - 1) / 2;
+
+        var row: usize = 0;
+        while (row < patch_rows) : (row += 1) {
+            var col: usize = 0;
+            while (col < patch_cols) : (col += 1) {
+                var control: [3][3]bsp.Vertex = undefined;
+                var cp_row: usize = 0;
+                while (cp_row < 3) : (cp_row += 1) {
+                    var cp_col: usize = 0;
+                    while (cp_col < 3) : (cp_col += 1) {
+                        const src_index = (row * 2 + cp_row) * patch_width + (col * 2 + cp_col);
+                        control[cp_row][cp_col] = surface_vertices[src_index];
+                    }
+                }
+                try self.appendTessellatedPatch(control, face.normal, tessellation);
+            }
+        }
+    }
+
+    fn appendTessellatedPatch(self: *MeshBuilder, control: [3][3]bsp.Vertex, face_normal: [3]f32, tessellation: usize) !void {
+        const row_count = tessellation + 1;
+        const samples = try self.allocator.alloc(SampledVertex, row_count * row_count);
+        defer self.allocator.free(samples);
+
+        var y: usize = 0;
+        while (y < row_count) : (y += 1) {
+            const v = @as(f32, @floatFromInt(y)) / @as(f32, @floatFromInt(tessellation));
+            var x: usize = 0;
+            while (x < row_count) : (x += 1) {
+                const u = @as(f32, @floatFromInt(x)) / @as(f32, @floatFromInt(tessellation));
+                samples[y * row_count + x] = samplePatch(control, u, v);
+            }
+        }
+
+        var cell_y: usize = 0;
+        while (cell_y < tessellation) : (cell_y += 1) {
+            var cell_x: usize = 0;
+            while (cell_x < tessellation) : (cell_x += 1) {
+                const s0 = cell_y * row_count + cell_x;
+                const s1 = s0 + 1;
+                const s2 = s0 + row_count;
+                const s3 = s2 + 1;
+
+                try self.appendSampledTriangle(samples[s0], samples[s2], samples[s1], face_normal, true);
+                try self.appendSampledTriangle(samples[s1], samples[s2], samples[s3], face_normal, true);
+            }
+        }
+    }
+
+    fn appendTriangle(
+        self: *MeshBuilder,
+        a: bsp.Vertex,
+        b: bsp.Vertex,
+        c: bsp.Vertex,
+        face_normal: [3]f32,
+        preferred_reverse_winding: bool,
+    ) !void {
+        const reverse_winding = shouldReverseTriangleVertices(a.position, b.position, c.position, face_normal, preferred_reverse_winding);
+        try self.appendVertex(.{
+            .position = a.position,
+            .texcoord = a.texcoord,
+            .lightmap_uv = a.lightmap_uv,
+            .normal = a.normal,
+            .color = a.color,
+        });
+        if (reverse_winding) {
+            try self.appendVertex(.{
+                .position = c.position,
+                .texcoord = c.texcoord,
+                .lightmap_uv = c.lightmap_uv,
+                .normal = c.normal,
+                .color = c.color,
+            });
+            try self.appendVertex(.{
+                .position = b.position,
+                .texcoord = b.texcoord,
+                .lightmap_uv = b.lightmap_uv,
+                .normal = b.normal,
+                .color = b.color,
+            });
+        } else {
+            try self.appendVertex(.{
+                .position = b.position,
+                .texcoord = b.texcoord,
+                .lightmap_uv = b.lightmap_uv,
+                .normal = b.normal,
+                .color = b.color,
+            });
+            try self.appendVertex(.{
+                .position = c.position,
+                .texcoord = c.texcoord,
+                .lightmap_uv = c.lightmap_uv,
+                .normal = c.normal,
+                .color = c.color,
+            });
+        }
+    }
+
+    fn appendSampledTriangle(
+        self: *MeshBuilder,
+        a: SampledVertex,
+        b: SampledVertex,
+        c: SampledVertex,
+        face_normal: [3]f32,
+        preferred_reverse_winding: bool,
+    ) !void {
+        const reverse_winding = shouldReverseTriangleVertices(a.position, b.position, c.position, face_normal, preferred_reverse_winding);
+        try self.appendVertex(a);
+        if (reverse_winding) {
+            try self.appendVertex(c);
+            try self.appendVertex(b);
+        } else {
+            try self.appendVertex(b);
+            try self.appendVertex(c);
+        }
+    }
+
+    fn appendVertex(self: *MeshBuilder, vertex: SampledVertex) !void {
+        const position = bsp.toEngineSpace(vertex.position);
+        const normal = normalizeVector(bsp.toEngineNormal(vertex.normal));
+
+        try self.positions.appendSlice(self.allocator, &.{ position.x, position.y, position.z });
+        try self.texcoords.appendSlice(self.allocator, &.{ vertex.texcoord[0], 1.0 - vertex.texcoord[1] });
+        try self.texcoords2.appendSlice(self.allocator, &.{ vertex.lightmap_uv[0], 1.0 - vertex.lightmap_uv[1] });
+        try self.normals.appendSlice(self.allocator, &.{ normal.x, normal.y, normal.z });
+        try self.colors.appendSlice(self.allocator, &.{ 255, 255, 255, vertex.color[3] });
+        self.vertex_count += 1;
+    }
+
+    fn toBatch(self: *MeshBuilder, allocator: std.mem.Allocator) !SurfaceBatch {
+        const texture_name = self.texture_name;
+        self.texture_name = "";
+        errdefer allocator.free(texture_name);
+
+        const positions = try self.positions.toOwnedSlice(allocator);
+        errdefer allocator.free(positions);
+
+        const texcoords = try self.texcoords.toOwnedSlice(allocator);
+        errdefer allocator.free(texcoords);
+
+        const texcoords2 = try self.texcoords2.toOwnedSlice(allocator);
+        errdefer allocator.free(texcoords2);
+
+        const normals = try self.normals.toOwnedSlice(allocator);
+        errdefer allocator.free(normals);
+
+        const colors = try self.colors.toOwnedSlice(allocator);
+        errdefer allocator.free(colors);
+
+        return .{
+            .texture_name = texture_name,
+            .lightmap_index = self.lightmap_index,
+            .render_mode = self.rule.render_mode,
+            .use_lightmap = self.rule.use_lightmap,
+            .double_sided = self.rule.double_sided,
+            .alpha_cutoff = self.rule.alpha_cutoff,
+            .positions = positions,
+            .texcoords = texcoords,
+            .texcoords2 = texcoords2,
+            .normals = normals,
+            .colors = colors,
+            .vertex_count = self.vertex_count,
+        };
+    }
+};
+
+const SampledVertex = struct {
+    position: [3]f32,
+    texcoord: [2]f32,
+    lightmap_uv: [2]f32,
+    normal: [3]f32,
+    color: [4]u8,
+};
+
+fn samplePatch(control: [3][3]bsp.Vertex, u: f32, v: f32) SampledVertex {
+    const wu = quadraticWeights(u);
+    const wv = quadraticWeights(v);
+
+    var position = [3]f32{ 0.0, 0.0, 0.0 };
+    var texcoord = [2]f32{ 0.0, 0.0 };
+    var lightmap_uv = [2]f32{ 0.0, 0.0 };
+    var normal = [3]f32{ 0.0, 0.0, 0.0 };
+    var color = [4]f32{ 0.0, 0.0, 0.0, 0.0 };
+
+    var row: usize = 0;
+    while (row < 3) : (row += 1) {
+        var col: usize = 0;
+        while (col < 3) : (col += 1) {
+            const weight = wu[col] * wv[row];
+            const vertex = control[row][col];
+
+            position[0] += vertex.position[0] * weight;
+            position[1] += vertex.position[1] * weight;
+            position[2] += vertex.position[2] * weight;
+
+            texcoord[0] += vertex.texcoord[0] * weight;
+            texcoord[1] += vertex.texcoord[1] * weight;
+
+            lightmap_uv[0] += vertex.lightmap_uv[0] * weight;
+            lightmap_uv[1] += vertex.lightmap_uv[1] * weight;
+
+            normal[0] += vertex.normal[0] * weight;
+            normal[1] += vertex.normal[1] * weight;
+            normal[2] += vertex.normal[2] * weight;
+
+            color[0] += @as(f32, @floatFromInt(vertex.color[0])) * weight;
+            color[1] += @as(f32, @floatFromInt(vertex.color[1])) * weight;
+            color[2] += @as(f32, @floatFromInt(vertex.color[2])) * weight;
+            color[3] += @as(f32, @floatFromInt(vertex.color[3])) * weight;
+        }
+    }
+
+    return .{
+        .position = position,
+        .texcoord = texcoord,
+        .lightmap_uv = lightmap_uv,
+        .normal = normal,
+        .color = .{
+            clampColor(color[0]),
+            clampColor(color[1]),
+            clampColor(color[2]),
+            clampColor(color[3]),
+        },
+    };
+}
+
+fn quadraticWeights(t: f32) [3]f32 {
+    const inv = 1.0 - t;
+    return .{
+        inv * inv,
+        2.0 * inv * t,
+        t * t,
+    };
+}
+
+fn clampColor(value: f32) u8 {
+    return @intFromFloat(@max(0.0, @min(255.0, value)));
+}
+
+fn normalizeVector(v: qmath.Vec3) qmath.Vec3 {
+    const len_sq = v.x * v.x + v.y * v.y + v.z * v.z;
+    if (len_sq <= 0.000001) {
+        return .{ .x = 0.0, .y = 1.0, .z = 0.0 };
+    }
+    const inv_len = 1.0 / @sqrt(len_sq);
+    return .{
+        .x = v.x * inv_len,
+        .y = v.y * inv_len,
+        .z = v.z * inv_len,
+    };
+}
+
+fn shouldReverseTriangleVertices(
+    a_position: [3]f32,
+    b_position: [3]f32,
+    c_position: [3]f32,
+    face_normal: [3]f32,
+    preferred_reverse_winding: bool,
+) bool {
+    const pa = bsp.toEngineSpace(a_position);
+    const pb = bsp.toEngineSpace(b_position);
+    const pc = bsp.toEngineSpace(c_position);
+
+    const edge_ab = qmath.Vec3{ .x = pb.x - pa.x, .y = pb.y - pa.y, .z = pb.z - pa.z };
+    const edge_ac = qmath.Vec3{ .x = pc.x - pa.x, .y = pc.y - pa.y, .z = pc.z - pa.z };
+    const geometric_normal = qmath.Vec3{
+        .x = edge_ab.y * edge_ac.z - edge_ab.z * edge_ac.y,
+        .y = edge_ab.z * edge_ac.x - edge_ab.x * edge_ac.z,
+        .z = edge_ab.x * edge_ac.y - edge_ab.y * edge_ac.x,
+    };
+    const geometric_len_sq = geometric_normal.x * geometric_normal.x +
+        geometric_normal.y * geometric_normal.y +
+        geometric_normal.z * geometric_normal.z;
+    if (geometric_len_sq <= 0.000001) return preferred_reverse_winding;
+
+    const expected_normal = bsp.toEngineNormal(face_normal);
+    const expected_len_sq = expected_normal.x * expected_normal.x +
+        expected_normal.y * expected_normal.y +
+        expected_normal.z * expected_normal.z;
+    if (expected_len_sq <= 0.000001) return preferred_reverse_winding;
+
+    const dot = geometric_normal.x * expected_normal.x +
+        geometric_normal.y * expected_normal.y +
+        geometric_normal.z * expected_normal.z;
+    return dot < 0.0;
+}
+
+fn shouldSkipTexture(texture_name: []const u8) bool {
+    return std.mem.startsWith(u8, texture_name, "textures/common/");
+}
