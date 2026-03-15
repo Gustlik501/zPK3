@@ -297,6 +297,34 @@ pub const Map = struct {
         return entities.parse(allocator, self.entities_source);
     }
 
+    pub fn estimatedMemoryBytes(self: *const Map) usize {
+        var total: usize = @sizeOf(Map);
+        total += self.path.len;
+        total += self.entities_source.len;
+        total += self.textures.len * @sizeOf(MapTexture);
+        for (self.textures) |texture| total += texture.name.len;
+        total += sliceMemoryBytes(Plane, self.planes);
+        total += sliceMemoryBytes(Node, self.nodes);
+        total += sliceMemoryBytes(Leaf, self.leaves);
+        total += sliceMemoryBytes(i32, self.leafsurfaces);
+        total += sliceMemoryBytes(i32, self.leafbrushes);
+        total += sliceMemoryBytes(Model, self.models);
+        total += sliceMemoryBytes(Brush, self.brushes);
+        total += sliceMemoryBytes(BrushSide, self.brushsides);
+        total += sliceMemoryBytes(Vertex, self.vertices);
+        total += sliceMemoryBytes(i32, self.meshverts);
+        total += self.effects.len * @sizeOf(Effect);
+        for (self.effects) |effect| total += effect.name.len;
+        total += sliceMemoryBytes(Face, self.faces);
+        total += self.lightmap_bytes.len;
+        total += sliceMemoryBytes(LightVolume, self.lightvols);
+        if (self.visdata) |visdata| {
+            total += @sizeOf(VisData);
+            total += visdata.bytes.len;
+        }
+        return total;
+    }
+
     pub fn validate(self: *const Map) ValidationReport {
         var report: ValidationReport = .{};
 
@@ -507,6 +535,10 @@ fn parseTextures(allocator: std.mem.Allocator, data: []const u8, lump: Lump) ![]
     }
 
     return textures;
+}
+
+fn sliceMemoryBytes(comptime T: type, slice: []const T) usize {
+    return slice.len * @sizeOf(T);
 }
 
 fn parseVertices(allocator: std.mem.Allocator, data: []const u8, lump: Lump) ![]Vertex {

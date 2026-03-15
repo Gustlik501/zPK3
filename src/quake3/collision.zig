@@ -117,6 +117,14 @@ pub const World = struct {
         self.* = undefined;
     }
 
+    pub fn estimatedMemoryBytes(self: *const World) usize {
+        var total: usize = @sizeOf(World) + self.brushes.len * @sizeOf(Brush);
+        for (self.brushes) |brush| {
+            total += brush.sides.len * @sizeOf(BrushSide);
+        }
+        return total;
+    }
+
     pub fn pointContents(self: *const World, map: *const bsp.Map, point: qmath.Vec3) i32 {
         const map_point = bsp.toMapSpace(point);
         return self.pointContentsMapPoint(map, map_point, -1);

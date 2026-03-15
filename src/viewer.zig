@@ -82,10 +82,11 @@ pub fn run(allocator: std.mem.Allocator) !void {
         if (inspector.stats_visible) {
             drawRuntimeStatsWindow(
                 &profiler,
-                map.path,
+                &map,
+                &entity_list,
+                &collision_world,
                 source_path,
                 &renderer,
-                entity_list.items.len,
                 validation.issueCount(),
                 inspector.visible,
                 &inspector.stats_visible,
@@ -419,10 +420,11 @@ const ProcessMemoryStats = struct {
 
 fn drawRuntimeStatsWindow(
     profiler: *const FrameProfiler,
-    map_path: []const u8,
+    map: *const q3.bsp.Map,
+    entity_list: *const q3.entities.EntityList,
+    collision_world: *const q3.collision.World,
     source_path: []const u8,
     renderer: *const q3.renderer.SceneRenderer,
-    entity_count: usize,
     validation_issue_count: usize,
     inspector_visible: bool,
     stats_visible: *bool,
@@ -439,15 +441,30 @@ fn drawRuntimeStatsWindow(
     var wire_mem_buf: [32]u8 = undefined;
     var material_mem_buf: [32]u8 = undefined;
     var total_mem_buf: [32]u8 = undefined;
+    var bsp_mem_buf: [32]u8 = undefined;
+    var entity_mem_buf: [32]u8 = undefined;
+    var collision_mem_buf: [32]u8 = undefined;
+    var object_mem_buf: [32]u8 = undefined;
+    var cache_mem_buf: [32]u8 = undefined;
     var rss_mem_buf: [32]u8 = undefined;
     var vmem_mem_buf: [32]u8 = undefined;
     var untracked_mem_buf: [32]u8 = undefined;
+    const parsed_bsp_bytes = map.estimatedMemoryBytes();
+    const entities_bytes = entity_list.estimatedMemoryBytes();
+    const collision_bytes = collision_world.estimatedMemoryBytes();
+    const object_bytes = renderer.estimatedSceneObjectMemoryBytes();
+    const cache_meta_bytes = renderer.estimatedCacheMetadataMemoryBytes();
     const total_tracked_bytes =
         renderer.stats.geometry_memory_bytes +
         renderer.stats.wireframe_memory_bytes +
         renderer.stats.material_memory_bytes +
         renderer.stats.texture_memory_bytes +
-        renderer.stats.lightmap_memory_bytes;
+        renderer.stats.lightmap_memory_bytes +
+        parsed_bsp_bytes +
+        entities_bytes +
+        collision_bytes +
+        object_bytes +
+        cache_meta_bytes;
     const frame_line = std.fmt.bufPrintZ(
         &line_buf,
         "FPS {d}  frame {d:.2} ms  CPU {d:.2} ms  present {d:.2} ms",
@@ -470,7 +487,7 @@ fn drawRuntimeStatsWindow(
 
     imgui.separator();
 
-    const map_line = std.fmt.bufPrintZ(&line_buf, "Map: {s}", .{map_path}) catch return;
+    const map_line = std.fmt.bufPrintZ(&line_buf, "Map: {s}", .{map.path}) catch return;
     imgui.text(map_line);
     const source_line = std.fmt.bufPrintZ(&line_buf, "PK3 source: {s}", .{source_path}) catch return;
     imgui.text(source_line);
@@ -478,7 +495,7 @@ fn drawRuntimeStatsWindow(
     const content_line = std.fmt.bufPrintZ(
         &line_buf,
         "Entities: {d}  Validation issues: {d}  Scene objects: {d}",
-        .{ entity_count, validation_issue_count, renderer.scene_objects.len },
+        .{ entity_list.items.len, validation_issue_count, renderer.scene_objects.len },
     ) catch return;
     imgui.text(content_line);
 
@@ -532,6 +549,19 @@ fn drawRuntimeStatsWindow(
         },
     ) catch return;
     imgui.text(memory_line);
+
+    const content_mem_line = std.fmt.bufPrintZ(
+        &line_buf,
+        "Content: bsp {s}  entities {s}  collision {s}  scene objs {s}  cache meta {s}",
+        .{
+            formatMemorySizeZ(&bsp_mem_buf, parsed_bsp_bytes),
+            formatMemorySizeZ(&entity_mem_buf, entities_bytes),
+            formatMemorySizeZ(&collision_mem_buf, collision_bytes),
+            formatMemorySizeZ(&object_mem_buf, object_bytes),
+            formatMemorySizeZ(&cache_mem_buf, cache_meta_bytes),
+        },
+    ) catch return;
+    imgui.text(content_mem_line);
 
     if (profiler.process_memory.rss_bytes) |rss_bytes| {
         const process_line = std.fmt.bufPrintZ(

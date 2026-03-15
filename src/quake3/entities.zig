@@ -68,6 +68,17 @@ pub const EntityList = struct {
         }
         return null;
     }
+
+    pub fn estimatedMemoryBytes(self: *const EntityList) usize {
+        var total: usize = @sizeOf(EntityList) + self.items.len * @sizeOf(Entity);
+        for (self.items) |entity| {
+            total += entity.pairs.len * @sizeOf(Pair);
+            for (entity.pairs) |pair| {
+                total += pair.key.len + pair.value.len;
+            }
+        }
+        return total;
+    }
 };
 
 pub fn parse(allocator: std.mem.Allocator, source: []const u8) !EntityList {

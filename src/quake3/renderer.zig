@@ -331,6 +331,20 @@ pub const SceneRenderer = struct {
         return object.origin;
     }
 
+    pub fn estimatedSceneObjectMemoryBytes(self: *const SceneRenderer) usize {
+        var total: usize = self.scene_objects.len * @sizeOf(SceneObject);
+        for (self.scene_objects) |object| {
+            total += object.classname.len;
+            if (object.targetname) |targetname| total += targetname.len;
+            if (object.model_path) |model_path| total += model_path.len;
+        }
+        return total;
+    }
+
+    pub fn estimatedCacheMetadataMemoryBytes(self: *const SceneRenderer) usize {
+        return self.texture_cache.metadataMemoryBytes() + self.lightmap_cache.metadataMemoryBytes();
+    }
+
     fn drawBatches(self: *SceneRenderer, mode: RenderMode) void {
         switch (mode) {
             .solid => {},
@@ -517,6 +531,41 @@ const TextureCache = struct {
         while (it.next()) |entry| {
             total += textureMemoryBytesEstimate(entry.value_ptr.*);
         }
+        return total;
+    }
+
+    fn metadataMemoryBytes(self: *const TextureCache) usize {
+        var total: usize = @sizeOf(TextureCache) + self.image_paths.items.len * @sizeOf([]const u8);
+
+        var texture_it = self.textures.iterator();
+        while (texture_it.next()) |entry| {
+            total += entry.key_ptr.*.len;
+            total += @sizeOf(rl.Texture2D);
+        }
+
+        var alias_it = self.shader_aliases.iterator();
+        while (alias_it.next()) |entry| {
+            total += entry.key_ptr.*.len + entry.value_ptr.*.len;
+        }
+
+        var rule_it = self.material_rules.iterator();
+        while (rule_it.next()) |entry| {
+            total += entry.key_ptr.*.len + @sizeOf(MaterialRule);
+        }
+
+        var fallback_it = self.fallback_paths.iterator();
+        while (fallback_it.next()) |entry| {
+            total += entry.key_ptr.*.len + entry.value_ptr.*.len;
+        }
+
+        var ambiguous_it = self.fallback_ambiguous.iterator();
+        while (ambiguous_it.next()) |entry| {
+            total += entry.key_ptr.*.len;
+        }
+
+        for (self.image_paths.items) |path| total += path.len;
+
+        total += self.shaders.estimatedMemoryBytes();
         return total;
     }
 
@@ -1100,6 +1149,10 @@ const LightmapCache = struct {
             total += textureMemoryBytesEstimate(texture);
         }
         return total;
+    }
+
+    fn metadataMemoryBytes(self: *const LightmapCache) usize {
+        return @sizeOf(LightmapCache) + self.textures.len * @sizeOf(rl.Texture2D);
     }
 };
 

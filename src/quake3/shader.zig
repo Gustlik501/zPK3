@@ -118,6 +118,17 @@ pub const Library = struct {
         return self.definitions.getPtr(name);
     }
 
+    pub fn estimatedMemoryBytes(self: *const Library) usize {
+        var total: usize = @sizeOf(Library);
+        var it = self.definitions.iterator();
+        while (it.next()) |entry| {
+            total += entry.key_ptr.*.len;
+            total += @sizeOf(Definition);
+            total += definitionMemoryBytes(entry.value_ptr.*);
+        }
+        return total;
+    }
+
     fn loadFromPacks(self: *Library, packs: anytype) !void {
         const shader_files = try packs.collectFilesWithSuffixAlloc(self.allocator, ".shader");
         defer {
@@ -377,6 +388,18 @@ fn normalizeOwned(allocator: std.mem.Allocator, text: []const u8) ![]u8 {
         byte.* = std.ascii.toLower(byte.*);
     }
     return owned;
+}
+
+fn definitionMemoryBytes(definition: Definition) usize {
+    var total: usize = 0;
+    if (definition.editor_image) |editor_image| total += editor_image.len;
+    total += definition.stages.len * @sizeOf(Stage);
+    for (definition.stages) |stage| {
+        if (stage.texture) |texture| total += texture.len;
+        total += stage.anim_frames.len * @sizeOf([]const u8);
+        for (stage.anim_frames) |frame| total += frame.len;
+    }
+    return total;
 }
 
 test "parse shader definition with animmap and material flags" {
