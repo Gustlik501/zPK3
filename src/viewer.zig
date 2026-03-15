@@ -49,7 +49,7 @@ pub fn run(allocator: std.mem.Allocator) !void {
         renderer.draw();
         rl.endMode3D();
 
-        drawOverlay(map, renderer.stats, source_path, entity_list.items.len, validation.issueCount());
+        drawOverlay(map, &renderer, source_path, entity_list.items.len, validation.issueCount());
     }
 }
 
@@ -176,16 +176,18 @@ fn normalize(v: rl.Vector3) rl.Vector3 {
 
 fn drawOverlay(
     map: q3.bsp.Map,
-    stats: q3.renderer.SceneStats,
+    renderer: *const q3.renderer.SceneRenderer,
     source_path: []const u8,
     entity_count: usize,
     validation_issue_count: usize,
 ) void {
-    rl.drawRectangle(12, 12, 520, 170, rl.fade(.black, 0.72));
-    rl.drawRectangleLines(12, 12, 520, 170, .dark_gray);
+    const stats = renderer.stats;
+
+    rl.drawRectangle(12, 12, 660, 252, rl.fade(.black, 0.72));
+    rl.drawRectangleLines(12, 12, 660, 252, .dark_gray);
     rl.drawText("Modular Quake 3 PK3 viewer", 24, 24, 24, .ray_white);
 
-    var line_buf: [256]u8 = undefined;
+    var line_buf: [384]u8 = undefined;
 
     const map_line = std.fmt.bufPrintZ(&line_buf, "Map: {s}", .{map.path}) catch return;
     rl.drawText(map_line, 24, 56, 18, .light_gray);
@@ -209,10 +211,70 @@ fn drawOverlay(
 
     const scene_line = std.fmt.bufPrintZ(
         &line_buf,
-        "Scene models: {d}  BSP submodels: {d}  World batches: {d}",
-        .{ stats.model_instance_count, stats.bsp_submodel_instance_count, stats.world_batch_count },
+        "Scene models: {d}  BSP submodels: {d}  World batches: {d}  Submodel batches: {d}",
+        .{ stats.model_instance_count, stats.bsp_submodel_instance_count, stats.world_batch_count, stats.submodel_batch_count },
     ) catch return;
     rl.drawText(scene_line, 24, 144, 18, .light_gray);
 
-    rl.drawText("Controls: RMB look, WASD fly, E/Q up-down, Shift boost, wheel FOV, F1 wire, F2 fullbright, F3 cull, F4 objects", 24, 166, 18, .gray);
+    const object_line = if (renderer.selectedSceneObject()) |object|
+        std.fmt.bufPrintZ(
+            &line_buf,
+            "Selected: {d}/{d} {s}  class={s}  model={s}  batches={d}",
+            .{
+                renderer.selected_scene_object_index.? + 1,
+                renderer.scene_objects.len,
+                switch (object.kind) {
+                    .bsp_submodel => "bsp_submodel",
+                    .external_model => "external_model",
+                },
+                object.classname,
+                object.model_path orelse "-",
+                renderer.selectedSceneObjectBatchCount(),
+            },
+        ) catch return
+    else
+        std.fmt.bufPrintZ(&line_buf, "Selected: none  Scene objects: {d}", .{renderer.scene_objects.len}) catch return;
+    rl.drawText(object_line, 24, 166, 18, .light_gray);
+
+    const object_detail_line = if (renderer.selectedSceneObject()) |object|
+        if (object.bsp_model_index) |index|
+            std.fmt.bufPrintZ(
+                &line_buf,
+                "Entity={d}  Target={s}  Origin=({d:.1}, {d:.1}, {d:.1})  BSP model={d}",
+                .{
+                    object.entity_index,
+                    object.targetname orelse "-",
+                    object.origin.x,
+                    object.origin.y,
+                    object.origin.z,
+                    index,
+                },
+            ) catch return
+        else
+            std.fmt.bufPrintZ(
+                &line_buf,
+                "Entity={d}  Target={s}  Origin=({d:.1}, {d:.1}, {d:.1})",
+                .{
+                    object.entity_index,
+                    object.targetname orelse "-",
+                    object.origin.x,
+                    object.origin.y,
+                    object.origin.z,
+                },
+            ) catch return
+    else
+        std.fmt.bufPrintZ(
+            &line_buf,
+            "Render toggles: world={s} submodels={s} isolate={s} objects={s}",
+            .{
+                if (renderer.draw_world_geometry) "on" else "off",
+                if (renderer.draw_submodel_geometry) "on" else "off",
+                if (renderer.isolate_selected_submodel) "on" else "off",
+                if (renderer.draw_scene_objects) "on" else "off",
+            },
+        ) catch return;
+    rl.drawText(object_detail_line, 24, 188, 18, .light_gray);
+
+    rl.drawText("Controls: RMB look, WASD fly, E/Q up-down, Shift boost, wheel FOV, Tab cycle objects", 24, 210, 18, .gray);
+    rl.drawText("F1 wire, F2 fullbright, F3 cull, F4 objects, F5 world, F6 submodels, F7 isolate", 24, 232, 18, .gray);
 }

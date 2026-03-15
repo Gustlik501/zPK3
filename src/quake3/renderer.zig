@@ -69,10 +69,22 @@ const SurfaceBatch = struct {
     alpha_cutoff: f32,
 };
 
-const SceneObject = struct {
+pub const SceneObject = struct {
+    entity_index: usize,
     kind: qscene.ModelInstanceKind,
-    origin: rl.Vector3,
+    classname: []const u8,
+    targetname: ?[]const u8,
+    model_path: ?[]const u8,
+    bsp_model_index: ?usize,
+    origin: qmath.Vec3,
     bounds: ?rl.BoundingBox,
+
+    pub fn deinit(self: *SceneObject, allocator: std.mem.Allocator) void {
+        allocator.free(self.classname);
+        if (self.targetname) |targetname| allocator.free(targetname);
+        if (self.model_path) |model_path| allocator.free(model_path);
+        self.* = undefined;
+    }
 };
 
 pub const SceneRenderer = struct {
@@ -90,6 +102,10 @@ pub const SceneRenderer = struct {
     fullbright: bool = false,
     backface_culling: bool = true,
     draw_scene_objects: bool = true,
+    draw_world_geometry: bool = true,
+    draw_submodel_geometry: bool = true,
+    isolate_selected_submodel: bool = false,
+    selected_scene_object_index: ?usize = null,
 
     pub fn init(allocator: std.mem.Allocator, packs: *archive.Pk3Collection, map: *const bsp.Map) !SceneRenderer {
         var texture_cache = try TextureCache.init(allocator, packs);
@@ -116,7 +132,10 @@ pub const SceneRenderer = struct {
         }
 
         const scene_objects = try buildSceneObjects(allocator, map, extracted_scene.model_instances);
-        errdefer allocator.free(scene_objects);
+        errdefer {
+            for (scene_objects) |*object| object.deinit(allocator);
+            allocator.free(scene_objects);
+        }
 
         for (extracted_scene.batches) |*batch| {
             const mesh = try loadMeshFromBatch(batch);
@@ -163,6 +182,7 @@ pub const SceneRenderer = struct {
             self.allocator.free(batch.wire_positions);
         }
         self.allocator.free(self.batches);
+        for (self.scene_objects) |*object| object.deinit(self.allocator);
         self.allocator.free(self.scene_objects);
         self.texture_cache.deinit();
         self.lightmap_cache.deinit();
@@ -183,12 +203,42 @@ pub const SceneRenderer = struct {
         if (rl.isKeyPressed(.f4)) {
             self.draw_scene_objects = !self.draw_scene_objects;
         }
+        if (rl.isKeyPressed(.f5)) {
+            self.draw_world_geometry = !self.draw_world_geometry;
+        }
+        if (rl.isKeyPressed(.f6)) {
+            self.draw_submodel_geometry = !self.draw_submodel_geometry;
+        }
+        if (rl.isKeyPressed(.f7)) {
+            self.isolate_selected_submodel = !self.isolate_selected_submodel;
+        }
+        if (rl.isKeyPressed(.tab)) {
+            self.selectNextSceneObject(if (isShiftDown()) -1 else 1);
+        }
 
         self.drawBatches(.solid);
         self.drawBatches(.alpha);
         self.drawBatches(.additive);
         if (self.draw_scene_objects) self.drawSceneObjects();
         rlgl.rlEnableBackfaceCulling();
+    }
+
+    pub fn selectedSceneObject(self: *const SceneRenderer) ?*const SceneObject {
+        const index = self.selected_scene_object_index orelse return null;
+        if (index >= self.scene_objects.len) return null;
+        return &self.scene_objects[index];
+    }
+
+    pub fn selectedSceneObjectBatchCount(self: *const SceneRenderer) usize {
+        const object = self.selectedSceneObject() orelse return 0;
+        if (object.bsp_model_index) |model_index| {
+            var count: usize = 0;
+            for (self.batches) |batch| {
+                if (batch.owner_bsp_model_index == model_index) count += 1;
+            }
+            return count;
+        }
+        return 0;
     }
 
     fn drawBatches(self: *SceneRenderer, mode: RenderMode) void {
@@ -204,6 +254,13 @@ pub const SceneRenderer = struct {
 
         for (self.batches) |batch| {
             if (batch.render_mode != mode) continue;
+            if (batch.owner_bsp_model_index == 0 and !self.draw_world_geometry) continue;
+            if (batch.owner_bsp_model_index != 0 and !self.draw_submodel_geometry) continue;
+            if (self.isolate_selected_submodel) {
+                if (self.selectedBspModelIndex()) |model_index| {
+                    if (batch.owner_bsp_model_index != model_index) continue;
+                }
+            }
 
             const use_lightmap: i32 = if (self.fullbright or self.draw_wireframe or !batch.use_lightmap) 0 else 1;
             const lightmap_scale: f32 = if (self.fullbright or self.draw_wireframe or !batch.use_lightmap) 1.0 else 2.0;
@@ -226,21 +283,48 @@ pub const SceneRenderer = struct {
     }
 
     fn drawSceneObjects(self: *SceneRenderer) void {
-        for (self.scene_objects) |object| {
+        const selected_index = self.selected_scene_object_index;
+        for (self.scene_objects, 0..) |object, object_index| {
+            const is_selected = selected_index != null and selected_index.? == object_index;
             switch (object.kind) {
                 .bsp_submodel => {
+                    const color: rl.Color = if (is_selected) .yellow else .orange;
                     if (object.bounds) |bounds| {
-                        rl.drawBoundingBox(bounds, .orange);
+                        rl.drawBoundingBox(bounds, color);
                     } else {
-                        rl.drawSphereWires(object.origin, 12.0, 8, 8, .orange);
+                        rl.drawSphereWires(toRlVector3(object.origin), 12.0, 8, 8, color);
                     }
                 },
                 .external_model => {
-                    rl.drawCubeWiresV(object.origin, .{ .x = 12.0, .y = 12.0, .z = 12.0 }, .sky_blue);
-                    rl.drawSphereWires(object.origin, 6.0, 6, 6, .blue);
+                    const box_color: rl.Color = if (is_selected) .lime else .sky_blue;
+                    const sphere_color: rl.Color = if (is_selected) .green else .blue;
+                    rl.drawCubeWiresV(toRlVector3(object.origin), .{ .x = 12.0, .y = 12.0, .z = 12.0 }, box_color);
+                    rl.drawSphereWires(toRlVector3(object.origin), 6.0, 6, 6, sphere_color);
                 },
             }
         }
+    }
+
+    fn selectNextSceneObject(self: *SceneRenderer, step: i32) void {
+        if (self.scene_objects.len == 0) {
+            self.selected_scene_object_index = null;
+            return;
+        }
+
+        if (self.selected_scene_object_index == null) {
+            self.selected_scene_object_index = if (step < 0) self.scene_objects.len - 1 else 0;
+            return;
+        }
+
+        const current: i32 = @intCast(self.selected_scene_object_index.?);
+        const len: i32 = @intCast(self.scene_objects.len);
+        const next = @mod(current + step, len);
+        self.selected_scene_object_index = @intCast(next);
+    }
+
+    fn selectedBspModelIndex(self: *const SceneRenderer) ?usize {
+        const object = self.selectedSceneObject() orelse return null;
+        return object.bsp_model_index;
     }
 };
 
@@ -884,10 +968,20 @@ fn buildSceneObjects(
     instances: []const qscene.ModelInstance,
 ) ![]SceneObject {
     const objects = try allocator.alloc(SceneObject, instances.len);
+    var built_count: usize = 0;
+    errdefer {
+        for (objects[0..built_count]) |*object| object.deinit(allocator);
+        allocator.free(objects);
+    }
     for (instances, objects) |instance, *object| {
         object.* = .{
+            .entity_index = instance.entity_index,
             .kind = instance.kind,
-            .origin = toRlVector3(instance.origin),
+            .classname = try allocator.dupe(u8, instance.classname),
+            .targetname = if (instance.targetname) |targetname| try allocator.dupe(u8, targetname) else null,
+            .model_path = if (instance.model_path) |model_path| try allocator.dupe(u8, model_path) else null,
+            .bsp_model_index = instance.bsp_model_index,
+            .origin = instance.origin,
             .bounds = null,
         };
 
@@ -898,8 +992,13 @@ fn buildSceneObjects(
                 }
             }
         }
+        built_count += 1;
     }
     return objects;
+}
+
+fn isShiftDown() bool {
+    return rl.isKeyDown(.left_shift) or rl.isKeyDown(.right_shift);
 }
 
 fn toRlVector3(v: qmath.Vec3) rl.Vector3 {

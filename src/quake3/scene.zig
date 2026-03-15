@@ -60,8 +60,10 @@ pub const ModelInstanceKind = enum {
 };
 
 pub const ModelInstance = struct {
+    entity_index: usize,
     kind: ModelInstanceKind,
     classname: []const u8,
+    targetname: ?[]const u8,
     model_path: ?[]const u8,
     bsp_model_index: ?usize,
     origin: qmath.Vec3,
@@ -69,6 +71,7 @@ pub const ModelInstance = struct {
 
     pub fn deinit(self: *ModelInstance, allocator: std.mem.Allocator) void {
         allocator.free(self.classname);
+        if (self.targetname) |targetname| allocator.free(targetname);
         if (self.model_path) |model_path| allocator.free(model_path);
         self.* = undefined;
     }
@@ -607,7 +610,7 @@ fn collectModelInstances(allocator: std.mem.Allocator, map: *const bsp.Map) !std
         instances.deinit(allocator);
     }
 
-    for (entity_list.items) |*entity| {
+    for (entity_list.items, 0..) |*entity, entity_index| {
         const classname = entity.classname() orelse continue;
         const model = entity.model() orelse continue;
 
@@ -616,8 +619,10 @@ fn collectModelInstances(allocator: std.mem.Allocator, map: *const bsp.Map) !std
             if (index >= map.models.len) continue;
 
             try instances.append(allocator, .{
+                .entity_index = entity_index,
                 .kind = .bsp_submodel,
                 .classname = try allocator.dupe(u8, classname),
+                .targetname = if (entity.targetname()) |value| try allocator.dupe(u8, value) else null,
                 .model_path = null,
                 .bsp_model_index = index,
                 .origin = entity.origin() orelse .{ .x = 0.0, .y = 0.0, .z = 0.0 },
@@ -627,8 +632,10 @@ fn collectModelInstances(allocator: std.mem.Allocator, map: *const bsp.Map) !std
         }
 
         try instances.append(allocator, .{
+            .entity_index = entity_index,
             .kind = .external_model,
             .classname = try allocator.dupe(u8, classname),
+            .targetname = if (entity.targetname()) |value| try allocator.dupe(u8, value) else null,
             .model_path = try allocator.dupe(u8, model),
             .bsp_model_index = null,
             .origin = entity.origin() orelse .{ .x = 0.0, .y = 0.0, .z = 0.0 },

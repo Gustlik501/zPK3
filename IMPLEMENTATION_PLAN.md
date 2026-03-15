@@ -40,7 +40,7 @@ This file is a working checklist for turning this repo into a PK3/BSP-native run
 - [x] Parse the entity lump into key/value entity records.
 - [x] Add typed helpers for common fields: classname, origin, angles, model, target, targetname.
 - [x] Build a small entity query API for the viewer and future game runtime.
-- [ ] Verify common map entities can be inspected from code.
+- [x] Verify common map entities can be inspected from code.
 
 ## Phase 4: Collision Runtime
 
@@ -55,7 +55,7 @@ This file is a working checklist for turning this repo into a PK3/BSP-native run
 ## Phase 5: Scene Extraction
 
 - [x] Introduce a backend-agnostic `scene` layer derived from BSP + entities.
-- [ ] Extract static world surfaces into scene batches/material references.
+- [x] Extract static world surfaces into scene batches/material references.
 - [x] Add BSP submodel extraction.
 - [x] Add entity-driven scene objects for `misc_model` and other common placements.
 - [x] Keep renderer input based on scene data, not raw BSP internals.
@@ -106,18 +106,18 @@ This file is a working checklist for turning this repo into a PK3/BSP-native run
 ## Phase 10: Tooling Base
 
 - [ ] Add debug overlays for entities, collision brushes, submodels, and missing assets.
-- [ ] Add a map/material/entity inspection flow in the viewer.
+- [x] Add a first scene-object/submodel inspection flow in the viewer.
 - [ ] Integrate `rlImGui` as the tooling UI layer for inspector/editor work.
 - [ ] Use that as the base for later editor work instead of jumping to full editing immediately.
 
 ## Immediate Execution Order
 
-- [ ] Refactor the project into backend-agnostic core modules plus viewer glue.
-- [ ] Expand BSP parsing to all required lumps.
-- [ ] Implement entity parsing.
-- [ ] Implement collision world creation and first trace APIs.
-- [ ] Convert the viewer to consume the new core structures.
+- [x] Refactor the project into backend-agnostic core modules plus viewer glue.
+- [x] Expand BSP parsing to all required lumps.
+- [x] Implement entity parsing.
+- [x] Implement collision world creation and first trace APIs.
+- [x] Convert the viewer to consume the new core structures.
 
 ## Current Focus
 
-- [ ] Add collision debug views/tests and start rendering or inspecting extracted scene objects/submodels.
+- [ ] Add collision debug views/tests and start `rlImGui` inspector integration for scene objects/submodels.
