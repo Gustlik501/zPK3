@@ -191,6 +191,13 @@ pub const SceneRenderer = struct {
             if (texture_cache.was_missing_last_load) {
                 stats.missing_texture_count += 1;
             }
+            if (binding.mode != .static) {
+                stats.animated_batch_count += 1;
+            }
+
+            stats.geometry_memory_bytes += batchMemoryBytes(batch);
+            stats.wireframe_memory_bytes += wire_positions.len * @sizeOf(f32);
+            stats.material_memory_bytes += material_name.len + bindingMemoryBytes(binding);
 
             model.materials[0].shader = lightmap_shader;
             model.materials[0].maps[@intFromEnum(rl.MATERIAL_MAP_DIFFUSE)].texture = texture;
@@ -207,6 +214,11 @@ pub const SceneRenderer = struct {
                 .alpha_cutoff = batch.alpha_cutoff,
             });
         }
+
+        stats.loaded_texture_count = texture_cache.loadedTextureCount();
+        stats.texture_memory_bytes = texture_cache.loadedTextureMemoryBytes();
+        stats.lightmap_texture_count = lightmap_cache.textureCount();
+        stats.lightmap_memory_bytes = lightmap_cache.memoryBytesEstimate();
 
         return .{
             .allocator = allocator,
@@ -263,6 +275,9 @@ pub const SceneRenderer = struct {
         if (rl.isKeyPressed(.tab)) {
             self.stepSelectedSceneObject(if (isShiftDown()) -1 else 1);
         }
+
+        self.stats.drawn_batch_count = 0;
+        self.stats.drawn_vertex_count = 0;
 
         self.drawBatches(.solid);
         self.drawBatches(.alpha);
@@ -358,6 +373,9 @@ pub const SceneRenderer = struct {
             } else {
                 rl.drawModel(batch.model, .{ .x = 0, .y = 0, .z = 0 }, 1.0, .white);
             }
+
+            self.stats.drawn_batch_count += 1;
+            self.stats.drawn_vertex_count += batch.wire_positions.len / 3;
         }
     }
 
@@ -487,6 +505,19 @@ const TextureCache = struct {
         }
         self.fallback_ambiguous.deinit();
         rl.unloadTexture(self.placeholder);
+    }
+
+    fn loadedTextureCount(self: *const TextureCache) usize {
+        return self.textures.count();
+    }
+
+    fn loadedTextureMemoryBytes(self: *const TextureCache) usize {
+        var total: usize = 0;
+        var it = self.textures.iterator();
+        while (it.next()) |entry| {
+            total += textureMemoryBytesEstimate(entry.value_ptr.*);
+        }
+        return total;
     }
 
     pub fn getTextureForMaterial(self: *TextureCache, material_name: []const u8, time_seconds: f64) !rl.Texture2D {
@@ -1058,6 +1089,18 @@ const LightmapCache = struct {
         if (lightmap_index >= self.textures.len) return self.white;
         return self.textures[lightmap_index];
     }
+
+    fn textureCount(self: *const LightmapCache) usize {
+        return self.textures.len + 1;
+    }
+
+    fn memoryBytesEstimate(self: *const LightmapCache) usize {
+        var total = textureMemoryBytesEstimate(self.white);
+        for (self.textures) |texture| {
+            total += textureMemoryBytesEstimate(texture);
+        }
+        return total;
+    }
 };
 
 fn createLightmapTexture(bytes: []const u8) !rl.Texture2D {
@@ -1136,6 +1179,36 @@ fn drawWireTriangles(positions: []const f32, color: rl.Color) void {
         rlgl.rlVertex3f(cx, cy, cz);
         rlgl.rlVertex3f(ax, ay, az);
     }
+}
+
+fn batchMemoryBytes(batch: *const qscene.SurfaceBatch) usize {
+    return batch.positions.len * @sizeOf(f32) +
+        batch.texcoords.len * @sizeOf(f32) +
+        batch.texcoords2.len * @sizeOf(f32) +
+        batch.normals.len * @sizeOf(f32) +
+        batch.colors.len * @sizeOf(u8) +
+        batch.texture_name.len;
+}
+
+fn bindingMemoryBytes(binding: MaterialBinding) usize {
+    return binding.animated_frames.len * @sizeOf(rl.Texture2D);
+}
+
+fn textureMemoryBytesEstimate(texture: rl.Texture2D) usize {
+    if (texture.id == 0 or texture.width <= 0 or texture.height <= 0) return 0;
+
+    var width = texture.width;
+    var height = texture.height;
+    var remaining_levels: i32 = @max(texture.mipmaps, 1);
+    var total: usize = 0;
+
+    while (remaining_levels > 0) : (remaining_levels -= 1) {
+        total += @intCast(rl.getPixelDataSize(width, height, texture.format));
+        if (width > 1) width = @max(@divFloor(width, 2), 1);
+        if (height > 1) height = @max(@divFloor(height, 2), 1);
+    }
+
+    return total;
 }
 
 fn buildSceneObjects(

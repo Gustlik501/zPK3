@@ -8,10 +8,20 @@ pub const SceneStats = struct {
     face_count: usize = 0,
     vertex_count: usize = 0,
     missing_texture_count: usize = 0,
+    drawn_batch_count: usize = 0,
+    drawn_vertex_count: usize = 0,
     model_instance_count: usize = 0,
     bsp_submodel_instance_count: usize = 0,
     world_batch_count: usize = 0,
     submodel_batch_count: usize = 0,
+    loaded_texture_count: usize = 0,
+    lightmap_texture_count: usize = 0,
+    animated_batch_count: usize = 0,
+    geometry_memory_bytes: usize = 0,
+    wireframe_memory_bytes: usize = 0,
+    material_memory_bytes: usize = 0,
+    texture_memory_bytes: usize = 0,
+    lightmap_memory_bytes: usize = 0,
 };
 
 pub const RenderMode = enum {

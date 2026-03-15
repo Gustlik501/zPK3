@@ -409,6 +409,12 @@ fn drawRuntimeStatsWindow(
     if (!open) return;
 
     var line_buf: [320]u8 = undefined;
+    var texture_mem_buf: [32]u8 = undefined;
+    var lightmap_mem_buf: [32]u8 = undefined;
+    var geom_mem_buf: [32]u8 = undefined;
+    var wire_mem_buf: [32]u8 = undefined;
+    var material_mem_buf: [32]u8 = undefined;
+    var total_mem_buf: [32]u8 = undefined;
     const frame_line = std.fmt.bufPrintZ(
         &line_buf,
         "FPS {d}  frame {d:.2} ms  CPU {d:.2} ms  present {d:.2} ms",
@@ -445,27 +451,61 @@ fn drawRuntimeStatsWindow(
 
     const batch_line = std.fmt.bufPrintZ(
         &line_buf,
-        "Batches: {d}  Faces: {d}  Draw verts: {d}  Missing textures: {d}",
+        "Batches: {d}  Drawn: {d}  Faces: {d}  Verts: {d}  Drawn verts: {d}",
         .{
             renderer.stats.batch_count,
+            renderer.stats.drawn_batch_count,
             renderer.stats.face_count,
             renderer.stats.vertex_count,
-            renderer.stats.missing_texture_count,
+            renderer.stats.drawn_vertex_count,
         },
     ) catch return;
     imgui.text(batch_line);
 
+    const textures_line = std.fmt.bufPrintZ(
+        &line_buf,
+        "Textures: {d} ({s})  Lightmaps: {d} ({s})  Missing textures: {d}",
+        .{
+            renderer.stats.loaded_texture_count,
+            formatMemorySizeZ(&texture_mem_buf, renderer.stats.texture_memory_bytes),
+            renderer.stats.lightmap_texture_count,
+            formatMemorySizeZ(&lightmap_mem_buf, renderer.stats.lightmap_memory_bytes),
+            renderer.stats.missing_texture_count,
+        },
+    ) catch return;
+    imgui.text(textures_line);
+
     const scene_line = std.fmt.bufPrintZ(
         &line_buf,
-        "Scene models: {d}  BSP submodels: {d}  World batches: {d}  Submodel batches: {d}",
+        "Scene models: {d}  BSP submodels: {d}  World batches: {d}  Submodel batches: {d}  Animated batches: {d}",
         .{
             renderer.stats.model_instance_count,
             renderer.stats.bsp_submodel_instance_count,
             renderer.stats.world_batch_count,
             renderer.stats.submodel_batch_count,
+            renderer.stats.animated_batch_count,
         },
     ) catch return;
     imgui.text(scene_line);
+
+    const memory_line = std.fmt.bufPrintZ(
+        &line_buf,
+        "CPU est: geom {s}  wire {s}  materials {s}  total tracked {s}",
+        .{
+            formatMemorySizeZ(&geom_mem_buf, renderer.stats.geometry_memory_bytes),
+            formatMemorySizeZ(&wire_mem_buf, renderer.stats.wireframe_memory_bytes),
+            formatMemorySizeZ(&material_mem_buf, renderer.stats.material_memory_bytes),
+            formatMemorySizeZ(
+                &total_mem_buf,
+                renderer.stats.geometry_memory_bytes +
+                    renderer.stats.wireframe_memory_bytes +
+                    renderer.stats.material_memory_bytes +
+                    renderer.stats.texture_memory_bytes +
+                    renderer.stats.lightmap_memory_bytes,
+            ),
+        },
+    ) catch return;
+    imgui.text(memory_line);
 
     const toggle_line = std.fmt.bufPrintZ(
         &line_buf,
@@ -854,4 +894,22 @@ fn collisionBoxSize() rl.Vector3 {
 fn nsBetween(start_ns: i128, end_ns: i128) u64 {
     if (end_ns <= start_ns) return 0;
     return @intCast(end_ns - start_ns);
+}
+
+fn formatMemorySizeZ(buffer: []u8, bytes: usize) [:0]const u8 {
+    const kib = 1024.0;
+    const mib = kib * 1024.0;
+    const gib = mib * 1024.0;
+    const value = @as(f64, @floatFromInt(bytes));
+
+    if (value >= gib) {
+        return std.fmt.bufPrintZ(buffer, "{d:.2} GiB", .{value / gib}) catch "n/a";
+    }
+    if (value >= mib) {
+        return std.fmt.bufPrintZ(buffer, "{d:.2} MiB", .{value / mib}) catch "n/a";
+    }
+    if (value >= kib) {
+        return std.fmt.bufPrintZ(buffer, "{d:.1} KiB", .{value / kib}) catch "n/a";
+    }
+    return std.fmt.bufPrintZ(buffer, "{d} B", .{bytes}) catch "n/a";
 }
