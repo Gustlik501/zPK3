@@ -209,10 +209,10 @@ fn drawOverlay(
 
     const scene_line = std.fmt.bufPrintZ(
         &line_buf,
-        "Scene models: {d}  BSP submodels: {d}",
-        .{ stats.model_instance_count, stats.bsp_submodel_instance_count },
+        "Scene models: {d}  BSP submodels: {d}  World batches: {d}",
+        .{ stats.model_instance_count, stats.bsp_submodel_instance_count, stats.world_batch_count },
     ) catch return;
     rl.drawText(scene_line, 24, 144, 18, .light_gray);
 
-    rl.drawText("Controls: RMB look, WASD fly, E/Q up-down, Shift boost, wheel FOV, F1 wire, F2 fullbright, F3 cull", 24, 166, 18, .gray);
+    rl.drawText("Controls: RMB look, WASD fly, E/Q up-down, Shift boost, wheel FOV, F1 wire, F2 fullbright, F3 cull, F4 objects", 24, 166, 18, .gray);
 }

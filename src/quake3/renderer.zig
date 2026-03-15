@@ -3,6 +3,7 @@ const rl = @import("raylib");
 const rlgl = rl.gl;
 const archive = @import("archive.zig");
 const bsp = @import("bsp.zig");
+const qmath = @import("math.zig");
 const qscene = @import("scene.zig");
 const tga = @import("tga.zig");
 
@@ -61,15 +62,23 @@ const MaterialRule = qscene.MaterialRule;
 const SurfaceBatch = struct {
     model: rl.Model,
     wire_positions: []f32,
+    owner_bsp_model_index: usize,
     render_mode: RenderMode,
     use_lightmap: bool,
     double_sided: bool,
     alpha_cutoff: f32,
 };
 
+const SceneObject = struct {
+    kind: qscene.ModelInstanceKind,
+    origin: rl.Vector3,
+    bounds: ?rl.BoundingBox,
+};
+
 pub const SceneRenderer = struct {
     allocator: std.mem.Allocator,
     batches: []SurfaceBatch,
+    scene_objects: []SceneObject,
     stats: SceneStats,
     texture_cache: TextureCache,
     lightmap_cache: LightmapCache,
@@ -80,6 +89,7 @@ pub const SceneRenderer = struct {
     draw_wireframe: bool = false,
     fullbright: bool = false,
     backface_culling: bool = true,
+    draw_scene_objects: bool = true,
 
     pub fn init(allocator: std.mem.Allocator, packs: *archive.Pk3Collection, map: *const bsp.Map) !SceneRenderer {
         var texture_cache = try TextureCache.init(allocator, packs);
@@ -105,6 +115,9 @@ pub const SceneRenderer = struct {
             batch_list.deinit(allocator);
         }
 
+        const scene_objects = try buildSceneObjects(allocator, map, extracted_scene.model_instances);
+        errdefer allocator.free(scene_objects);
+
         for (extracted_scene.batches) |*batch| {
             const mesh = try loadMeshFromBatch(batch);
             var model = try rl.loadModelFromMesh(mesh);
@@ -122,6 +135,7 @@ pub const SceneRenderer = struct {
             try batch_list.append(allocator, .{
                 .model = model,
                 .wire_positions = wire_positions,
+                .owner_bsp_model_index = batch.owner_bsp_model_index,
                 .render_mode = batch.render_mode,
                 .use_lightmap = batch.use_lightmap,
                 .double_sided = batch.double_sided,
@@ -132,6 +146,7 @@ pub const SceneRenderer = struct {
         return .{
             .allocator = allocator,
             .batches = try batch_list.toOwnedSlice(allocator),
+            .scene_objects = scene_objects,
             .stats = stats,
             .texture_cache = texture_cache,
             .lightmap_cache = lightmap_cache,
@@ -148,6 +163,7 @@ pub const SceneRenderer = struct {
             self.allocator.free(batch.wire_positions);
         }
         self.allocator.free(self.batches);
+        self.allocator.free(self.scene_objects);
         self.texture_cache.deinit();
         self.lightmap_cache.deinit();
         rl.unloadShader(self.lightmap_shader);
@@ -164,10 +180,14 @@ pub const SceneRenderer = struct {
         if (rl.isKeyPressed(.f3)) {
             self.backface_culling = !self.backface_culling;
         }
+        if (rl.isKeyPressed(.f4)) {
+            self.draw_scene_objects = !self.draw_scene_objects;
+        }
 
         self.drawBatches(.solid);
         self.drawBatches(.alpha);
         self.drawBatches(.additive);
+        if (self.draw_scene_objects) self.drawSceneObjects();
         rlgl.rlEnableBackfaceCulling();
     }
 
@@ -201,6 +221,24 @@ pub const SceneRenderer = struct {
                 drawWireTriangles(batch.wire_positions, .{ .r = 96, .g = 255, .b = 128, .a = 255 });
             } else {
                 rl.drawModel(batch.model, .{ .x = 0, .y = 0, .z = 0 }, 1.0, .white);
+            }
+        }
+    }
+
+    fn drawSceneObjects(self: *SceneRenderer) void {
+        for (self.scene_objects) |object| {
+            switch (object.kind) {
+                .bsp_submodel => {
+                    if (object.bounds) |bounds| {
+                        rl.drawBoundingBox(bounds, .orange);
+                    } else {
+                        rl.drawSphereWires(object.origin, 12.0, 8, 8, .orange);
+                    }
+                },
+                .external_model => {
+                    rl.drawCubeWiresV(object.origin, .{ .x = 12.0, .y = 12.0, .z = 12.0 }, .sky_blue);
+                    rl.drawSphereWires(object.origin, 6.0, 6, 6, .blue);
+                },
             }
         }
     }
@@ -838,6 +876,51 @@ fn drawWireTriangles(positions: []const f32, color: rl.Color) void {
         rlgl.rlVertex3f(cx, cy, cz);
         rlgl.rlVertex3f(ax, ay, az);
     }
+}
+
+fn buildSceneObjects(
+    allocator: std.mem.Allocator,
+    map: *const bsp.Map,
+    instances: []const qscene.ModelInstance,
+) ![]SceneObject {
+    const objects = try allocator.alloc(SceneObject, instances.len);
+    for (instances, objects) |instance, *object| {
+        object.* = .{
+            .kind = instance.kind,
+            .origin = toRlVector3(instance.origin),
+            .bounds = null,
+        };
+
+        if (instance.kind == .bsp_submodel) {
+            if (instance.bsp_model_index) |model_index| {
+                if (model_index < map.models.len) {
+                    object.bounds = toBoundingBox(map.models[model_index]);
+                }
+            }
+        }
+    }
+    return objects;
+}
+
+fn toRlVector3(v: qmath.Vec3) rl.Vector3 {
+    return .{ .x = v.x, .y = v.y, .z = v.z };
+}
+
+fn toBoundingBox(model: bsp.Model) rl.BoundingBox {
+    const a = bsp.toEngineSpace(model.mins);
+    const b = bsp.toEngineSpace(model.maxs);
+    return .{
+        .min = .{
+            .x = @min(a.x, b.x),
+            .y = @min(a.y, b.y),
+            .z = @min(a.z, b.z),
+        },
+        .max = .{
+            .x = @max(a.x, b.x),
+            .y = @max(a.y, b.y),
+            .z = @max(a.z, b.z),
+        },
+    };
 }
 
 fn copyToRaylibAlloc(comptime T: type, items: []const T) ![*c]T {

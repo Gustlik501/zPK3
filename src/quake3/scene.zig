@@ -10,6 +10,8 @@ pub const SceneStats = struct {
     missing_texture_count: usize = 0,
     model_instance_count: usize = 0,
     bsp_submodel_instance_count: usize = 0,
+    world_batch_count: usize = 0,
+    submodel_batch_count: usize = 0,
 };
 
 pub const RenderMode = enum {
@@ -27,6 +29,7 @@ pub const MaterialRule = struct {
 };
 
 pub const SurfaceBatch = struct {
+    owner_bsp_model_index: usize,
     texture_name: []const u8,
     lightmap_index: i32,
     render_mode: RenderMode,
@@ -84,15 +87,19 @@ pub const Scene = struct {
             builders.deinit(allocator);
         }
 
+        const face_owner_models = try collectFaceOwnerModels(allocator, map);
+        defer allocator.free(face_owner_models);
+
         var stats: SceneStats = .{};
 
-        for (map.faces) |face| {
+        for (map.faces, 0..) |face, face_index| {
             if (face.texture < 0 or @as(usize, @intCast(face.texture)) >= map.textures.len) continue;
             const texture_name = map.textures[@intCast(face.texture)].name;
             const rule = material_provider.getMaterialRule(texture_name);
             if (rule.skip or shouldSkipTexture(texture_name)) continue;
 
             const builder = try getOrCreateBuilder(allocator, &builders, .{
+                .owner_bsp_model_index = face_owner_models[face_index],
                 .texture_name = texture_name,
                 .lightmap_index = if (rule.use_lightmap) face.lightmap_index else -1,
                 .rule = rule,
@@ -123,6 +130,11 @@ pub const Scene = struct {
             if (builder.vertex_count == 0) continue;
             try batch_list.append(allocator, try builder.toBatch(allocator));
             stats.vertex_count += builder.vertex_count;
+            if (builder.owner_bsp_model_index == 0) {
+                stats.world_batch_count += 1;
+            } else {
+                stats.submodel_batch_count += 1;
+            }
         }
 
         stats.batch_count = batch_list.items.len;
@@ -149,6 +161,7 @@ pub const Scene = struct {
 };
 
 const BatchKey = struct {
+    owner_bsp_model_index: usize,
     texture_name: []const u8,
     lightmap_index: i32,
     rule: MaterialRule,
@@ -160,7 +173,8 @@ fn getOrCreateBuilder(
     key: BatchKey,
 ) !*MeshBuilder {
     for (builders.items) |*builder| {
-        if (builder.lightmap_index == key.lightmap_index and
+        if (builder.owner_bsp_model_index == key.owner_bsp_model_index and
+            builder.lightmap_index == key.lightmap_index and
             std.mem.eql(u8, builder.texture_name, key.texture_name) and
             builder.rule.render_mode == key.rule.render_mode and
             builder.rule.use_lightmap == key.rule.use_lightmap and
@@ -171,12 +185,19 @@ fn getOrCreateBuilder(
         }
     }
 
-    try builders.append(allocator, try MeshBuilder.init(allocator, key.texture_name, key.lightmap_index, key.rule));
+    try builders.append(allocator, try MeshBuilder.init(
+        allocator,
+        key.owner_bsp_model_index,
+        key.texture_name,
+        key.lightmap_index,
+        key.rule,
+    ));
     return &builders.items[builders.items.len - 1];
 }
 
 const MeshBuilder = struct {
     allocator: std.mem.Allocator,
+    owner_bsp_model_index: usize,
     texture_name: []const u8,
     lightmap_index: i32,
     rule: MaterialRule,
@@ -187,9 +208,16 @@ const MeshBuilder = struct {
     colors: std.ArrayList(u8),
     vertex_count: usize = 0,
 
-    fn init(allocator: std.mem.Allocator, texture_name: []const u8, lightmap_index: i32, rule: MaterialRule) !MeshBuilder {
+    fn init(
+        allocator: std.mem.Allocator,
+        owner_bsp_model_index: usize,
+        texture_name: []const u8,
+        lightmap_index: i32,
+        rule: MaterialRule,
+    ) !MeshBuilder {
         return .{
             .allocator = allocator,
+            .owner_bsp_model_index = owner_bsp_model_index,
             .texture_name = try allocator.dupe(u8, texture_name),
             .lightmap_index = lightmap_index,
             .rule = rule,
@@ -408,6 +436,7 @@ const MeshBuilder = struct {
         errdefer allocator.free(colors);
 
         return .{
+            .owner_bsp_model_index = self.owner_bsp_model_index,
             .texture_name = texture_name,
             .lightmap_index = self.lightmap_index,
             .render_mode = self.rule.render_mode,
@@ -547,6 +576,25 @@ fn shouldReverseTriangleVertices(
 
 fn shouldSkipTexture(texture_name: []const u8) bool {
     return std.mem.startsWith(u8, texture_name, "textures/common/");
+}
+
+fn collectFaceOwnerModels(allocator: std.mem.Allocator, map: *const bsp.Map) ![]usize {
+    const owners = try allocator.alloc(usize, map.faces.len);
+    @memset(owners, 0);
+
+    if (map.models.len <= 1) return owners;
+
+    for (map.models[1..], 1..) |model, model_index| {
+        if (model.face_index < 0 or model.face_count <= 0) continue;
+        const start: usize = @intCast(model.face_index);
+        const count: usize = @intCast(model.face_count);
+        if (start + count > owners.len) continue;
+        for (owners[start .. start + count]) |*owner| {
+            owner.* = model_index;
+        }
+    }
+
+    return owners;
 }
 
 fn collectModelInstances(allocator: std.mem.Allocator, map: *const bsp.Map) !std.ArrayList(ModelInstance) {
