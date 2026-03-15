@@ -50,7 +50,7 @@ This file is a working checklist for turning this repo into a PK3/BSP-native run
 - [x] Implement `pointContents`.
 - [x] Implement raycast/segment trace.
 - [x] Implement swept AABB trace.
-- [ ] Add debug output/tests for collision edge cases.
+- [ ] Expand the first collision debug/test pass to cover more brush edge cases.
 
 ## Phase 5: Scene Extraction
 
@@ -120,4 +120,4 @@ This file is a working checklist for turning this repo into a PK3/BSP-native run
 
 ## Current Focus
 
-- [ ] Add collision debug views/tests and extend the `rlImGui` inspector beyond scene objects/submodels.
+- [ ] Move from the first collision debug pass into broader collision coverage or the shader/material runtime.

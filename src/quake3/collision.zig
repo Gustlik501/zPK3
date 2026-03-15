@@ -270,3 +270,90 @@ fn lerp(a: qmath.Vec3, b: qmath.Vec3, t: f32) qmath.Vec3 {
 fn clampFraction(value: f32) f32 {
     return @max(0.0, @min(1.0, value));
 }
+
+test "pointContents and segment trace hit a simple cube brush" {
+    var map = try makeTestCubeMap(std.testing.allocator);
+    defer map.deinit();
+
+    var world = try World.initFromMap(std.testing.allocator, &map);
+    defer world.deinit();
+
+    try std.testing.expectEqual(@as(i32, 1), world.pointContents(&map, .{ .x = 0.0, .y = 0.0, .z = 0.0 }));
+    try std.testing.expectEqual(@as(i32, 0), world.pointContents(&map, .{ .x = 96.0, .y = 0.0, .z = 0.0 }));
+
+    const trace = world.traceSegment(
+        &map,
+        .{ .x = -100.0, .y = 0.0, .z = 0.0 },
+        .{ .x = 100.0, .y = 0.0, .z = 0.0 },
+    );
+
+    try std.testing.expect(trace.hit);
+    try std.testing.expect(!trace.start_solid);
+    try std.testing.expectEqual(@as(?usize, 0), trace.brush_index);
+    try std.testing.expectApproxEqAbs(-32.0, trace.end_position.x, 0.01);
+    try std.testing.expectApproxEqAbs(0.34, trace.fraction, 0.01);
+    try std.testing.expectApproxEqAbs(-1.0, trace.normal.x, 0.01);
+}
+
+fn makeTestCubeMap(allocator: std.mem.Allocator) !bsp.Map {
+    const textures = try allocator.alloc(bsp.MapTexture, 1);
+    errdefer allocator.free(textures);
+    textures[0] = .{
+        .name = try allocator.dupe(u8, "textures/test/solid"),
+        .flags = 0,
+        .contents = 1,
+    };
+    errdefer allocator.free(textures[0].name);
+
+    const planes = try allocator.alloc(bsp.Plane, 6);
+    errdefer allocator.free(planes);
+    planes[0] = .{ .normal = .{ 1.0, 0.0, 0.0 }, .distance = 32.0 };
+    planes[1] = .{ .normal = .{ -1.0, 0.0, 0.0 }, .distance = 32.0 };
+    planes[2] = .{ .normal = .{ 0.0, 1.0, 0.0 }, .distance = 32.0 };
+    planes[3] = .{ .normal = .{ 0.0, -1.0, 0.0 }, .distance = 32.0 };
+    planes[4] = .{ .normal = .{ 0.0, 0.0, 1.0 }, .distance = 32.0 };
+    planes[5] = .{ .normal = .{ 0.0, 0.0, -1.0 }, .distance = 32.0 };
+
+    const brushes = try allocator.alloc(bsp.Brush, 1);
+    errdefer allocator.free(brushes);
+    brushes[0] = .{
+        .brushside_index = 0,
+        .brushside_count = 6,
+        .texture = 0,
+    };
+
+    const brushsides = try allocator.alloc(bsp.BrushSide, 6);
+    errdefer allocator.free(brushsides);
+    for (brushsides, 0..) |*brushside, index| {
+        brushside.* = .{
+            .plane = @intCast(index),
+            .texture = 0,
+        };
+    }
+
+    return .{
+        .allocator = allocator,
+        .path = try allocator.dupe(u8, "test_cube.bsp"),
+        .entities_source = try allocator.dupe(u8, ""),
+        .textures = textures,
+        .planes = planes,
+        .nodes = try allocator.alloc(bsp.Node, 0),
+        .leaves = try allocator.alloc(bsp.Leaf, 0),
+        .leafsurfaces = try allocator.alloc(i32, 0),
+        .leafbrushes = try allocator.alloc(i32, 0),
+        .models = try allocator.alloc(bsp.Model, 0),
+        .brushes = brushes,
+        .brushsides = brushsides,
+        .vertices = try allocator.alloc(bsp.Vertex, 0),
+        .meshverts = try allocator.alloc(i32, 0),
+        .effects = try allocator.alloc(bsp.Effect, 0),
+        .faces = try allocator.alloc(bsp.Face, 0),
+        .lightmap_bytes = try allocator.alloc(u8, 0),
+        .lightvols = try allocator.alloc(bsp.LightVolume, 0),
+        .visdata = null,
+        .lightmap_count = 0,
+        .bounds_min = .{ .x = -32.0, .y = -32.0, .z = -32.0 },
+        .bounds_max = .{ .x = 32.0, .y = 32.0, .z = 32.0 },
+        .bounds_center = .{ .x = 0.0, .y = 0.0, .z = 0.0 },
+    };
+}

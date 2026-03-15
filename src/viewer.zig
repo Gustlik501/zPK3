@@ -27,6 +27,8 @@ pub fn run(allocator: std.mem.Allocator) !void {
     const validation = map.validate();
     var entity_list = try map.parseEntities(allocator);
     defer entity_list.deinit();
+    var collision_world = try q3.collision.World.initFromMap(allocator, &map);
+    defer collision_world.deinit();
 
     rl.setConfigFlags(.{ .window_resizable = true, .msaa_4x_hint = true });
     rl.initWindow(1600, 900, "quake3 pk3 viewer");
@@ -49,6 +51,7 @@ pub fn run(allocator: std.mem.Allocator) !void {
         }
 
         controller.update(&camera, inspector.capture_mouse, inspector.capture_keyboard);
+        updateCollisionDebugState(&inspector.collision, &collision_world, &map, &camera, &controller, &renderer);
 
         rl.beginDrawing();
         defer rl.endDrawing();
@@ -56,13 +59,14 @@ pub fn run(allocator: std.mem.Allocator) !void {
         rl.clearBackground(.{ .r = 10, .g = 8, .b = 6, .a = 255 });
         rl.beginMode3D(camera);
         renderer.draw();
+        drawCollisionDebug(&inspector.collision);
         rl.endMode3D();
 
         imgui.begin();
         defer imgui.end();
 
         if (inspector.visible) {
-            drawInspector(&renderer, &camera, &controller, &inspector);
+            drawInspector(&collision_world, &renderer, &camera, &controller, &inspector);
         }
 
         inspector.capture_mouse = imgui.wantCaptureMouse();
@@ -320,9 +324,11 @@ const InspectorState = struct {
     visible: bool = true,
     capture_mouse: bool = false,
     capture_keyboard: bool = false,
+    collision: CollisionDebugState = .{},
 };
 
 fn drawInspector(
+    collision_world: *const q3.collision.World,
     renderer: *q3.renderer.SceneRenderer,
     camera: *rl.Camera,
     controller: *CameraController,
@@ -369,6 +375,9 @@ fn drawInspector(
 
     imgui.separator();
     drawInspectorDetails(renderer);
+
+    imgui.separator();
+    drawCollisionInspector(collision_world, renderer, camera, controller, &inspector.collision);
 }
 
 fn drawInspectorDetails(renderer: *const q3.renderer.SceneRenderer) void {
@@ -439,4 +448,231 @@ fn focusCameraOnSelection(
         .z = target.z + 160.0,
     };
     controller.syncFromCamera(camera.*);
+}
+
+const CollisionTraceMode = enum {
+    forward,
+    selection,
+};
+
+const CollisionTraceSnapshot = struct {
+    start: q3.math.Vec3,
+    intended_end: q3.math.Vec3,
+    result: q3.collision.TraceResult,
+};
+
+const CollisionDebugState = struct {
+    draw_debug: bool = true,
+    use_box_trace: bool = true,
+    trace_mode: CollisionTraceMode = .selection,
+    trace_length_index: usize = 2,
+    camera_contents: i32 = 0,
+    last_trace: ?CollisionTraceSnapshot = null,
+};
+
+const collision_trace_lengths = [_]f32{ 256.0, 512.0, 1024.0, 2048.0, 4096.0 };
+const collision_box_mins = q3.math.Vec3{ .x = -16.0, .y = -16.0, .z = -24.0 };
+const collision_box_maxs = q3.math.Vec3{ .x = 16.0, .y = 16.0, .z = 32.0 };
+
+fn updateCollisionDebugState(
+    state: *CollisionDebugState,
+    collision_world: *const q3.collision.World,
+    map: *const q3.bsp.Map,
+    camera: *const rl.Camera,
+    controller: *const CameraController,
+    renderer: *const q3.renderer.SceneRenderer,
+) void {
+    const start = fromRlVector3(camera.position);
+    state.camera_contents = collision_world.pointContents(map, start);
+
+    const intended_end = collisionTraceTarget(state, camera, controller, renderer);
+    const result = if (state.use_box_trace)
+        collision_world.traceBox(map, start, intended_end, collision_box_mins, collision_box_maxs)
+    else
+        collision_world.traceSegment(map, start, intended_end);
+
+    state.last_trace = .{
+        .start = start,
+        .intended_end = intended_end,
+        .result = result,
+    };
+}
+
+fn collisionTraceTarget(
+    state: *const CollisionDebugState,
+    camera: *const rl.Camera,
+    controller: *const CameraController,
+    renderer: *const q3.renderer.SceneRenderer,
+) q3.math.Vec3 {
+    if (state.trace_mode == .selection) {
+        if (renderer.selectedSceneObjectFocusPoint()) |focus| return focus;
+    }
+
+    const start = fromRlVector3(camera.position);
+    const forward = fromRlVector3(controller.forwardVector());
+    return addVec3(start, scaleVec3(forward, collision_trace_lengths[state.trace_length_index]));
+}
+
+fn drawCollisionInspector(
+    collision_world: *const q3.collision.World,
+    renderer: *q3.renderer.SceneRenderer,
+    camera: *rl.Camera,
+    controller: *CameraController,
+    state: *CollisionDebugState,
+) void {
+    var line_buf: [320]u8 = undefined;
+
+    imgui.text("Collision");
+    _ = imgui.checkbox("Draw collision trace", &state.draw_debug);
+    _ = imgui.checkbox("Use swept player box", &state.use_box_trace);
+
+    if (imgui.button("Target forward")) state.trace_mode = .forward;
+    imgui.sameLine();
+    if (imgui.button("Target selection")) state.trace_mode = .selection;
+    imgui.sameLine();
+    if (imgui.button("Focus hit")) {
+        focusCameraOnCollisionHit(camera, controller, state);
+    }
+
+    if (imgui.button("Shorter trace")) {
+        if (state.trace_length_index > 0) state.trace_length_index -= 1;
+    }
+    imgui.sameLine();
+    if (imgui.button("Longer trace")) {
+        if (state.trace_length_index + 1 < collision_trace_lengths.len) state.trace_length_index += 1;
+    }
+
+    const summary = std.fmt.bufPrintZ(
+        &line_buf,
+        "Brushes: {d}  Camera contents: 0x{x}  Trace len: {d:.0}",
+        .{ collision_world.brushes.len, @as(u32, @bitCast(state.camera_contents)), collision_trace_lengths[state.trace_length_index] },
+    ) catch return;
+    imgui.text(summary);
+
+    const mode_line = std.fmt.bufPrintZ(
+        &line_buf,
+        "Mode: {s}  Query: {s}",
+        .{
+            switch (state.trace_mode) {
+                .forward => "forward",
+                .selection => "selection",
+            },
+            if (state.use_box_trace) "swept_box" else "segment",
+        },
+    ) catch return;
+    imgui.text(mode_line);
+
+    if (state.trace_mode == .selection and renderer.selectedSceneObject() == null) {
+        imgui.text("Selection target unavailable; using forward trace.");
+    }
+
+    if (state.last_trace) |trace| {
+        const result = trace.result;
+        const trace_line = std.fmt.bufPrintZ(
+            &line_buf,
+            "Hit: {s}  Start solid: {s}  Fraction: {d:.3}",
+            .{
+                if (result.hit) "yes" else "no",
+                if (result.start_solid) "yes" else "no",
+                result.fraction,
+            },
+        ) catch return;
+        imgui.text(trace_line);
+
+        const hit_line = std.fmt.bufPrintZ(
+            &line_buf,
+            "End: ({d:.1}, {d:.1}, {d:.1})",
+            .{ result.end_position.x, result.end_position.y, result.end_position.z },
+        ) catch return;
+        imgui.text(hit_line);
+
+        if (result.hit) {
+            const normal_line = std.fmt.bufPrintZ(
+                &line_buf,
+                "Normal: ({d:.2}, {d:.2}, {d:.2})",
+                .{ result.normal.x, result.normal.y, result.normal.z },
+            ) catch return;
+            imgui.text(normal_line);
+
+            const brush_line = if (result.brush_index) |brush_index|
+                std.fmt.bufPrintZ(
+                    &line_buf,
+                    "Brush: {d}  Contents: 0x{x}  Flags: 0x{x}",
+                    .{
+                        brush_index,
+                        @as(u32, @bitCast(result.contents)),
+                        @as(u32, @bitCast(result.flags)),
+                    },
+                ) catch return
+            else
+                std.fmt.bufPrintZ(
+                    &line_buf,
+                    "Brush: none  Contents: 0x{x}  Flags: 0x{x}",
+                    .{
+                        @as(u32, @bitCast(result.contents)),
+                        @as(u32, @bitCast(result.flags)),
+                    },
+                ) catch return;
+            imgui.text(brush_line);
+        }
+    }
+}
+
+fn focusCameraOnCollisionHit(
+    camera: *rl.Camera,
+    controller: *CameraController,
+    state: *const CollisionDebugState,
+) void {
+    const trace = state.last_trace orelse return;
+    const target = toRlVector3(trace.result.end_position);
+    camera.target = target;
+    camera.position = .{
+        .x = target.x + 96.0,
+        .y = target.y + 64.0,
+        .z = target.z + 96.0,
+    };
+    controller.syncFromCamera(camera.*);
+}
+
+fn drawCollisionDebug(state: *const CollisionDebugState) void {
+    if (!state.draw_debug) return;
+    const trace = state.last_trace orelse return;
+
+    const start = toRlVector3(trace.start);
+    const intended_end = toRlVector3(trace.intended_end);
+    const actual_end = toRlVector3(trace.result.end_position);
+
+    rl.drawSphereWires(start, 6.0, 8, 8, .sky_blue);
+    rl.drawLine3D(start, intended_end, .dark_gray);
+    rl.drawLine3D(start, actual_end, if (trace.result.hit) .orange else .green);
+
+    if (state.use_box_trace) {
+        rl.drawCubeWiresV(actual_end, .{ .x = 32.0, .y = 56.0, .z = 32.0 }, if (trace.result.hit) .orange else .green);
+    }
+
+    if (trace.result.hit) {
+        const normal_end = toRlVector3(addVec3(trace.result.end_position, scaleVec3(trace.result.normal, 48.0)));
+        rl.drawSphereWires(actual_end, 8.0, 8, 8, .yellow);
+        rl.drawLine3D(actual_end, normal_end, .yellow);
+    }
+}
+
+fn fromRlVector3(v: rl.Vector3) q3.math.Vec3 {
+    return .{ .x = v.x, .y = v.y, .z = v.z };
+}
+
+fn addVec3(a: q3.math.Vec3, b: q3.math.Vec3) q3.math.Vec3 {
+    return .{
+        .x = a.x + b.x,
+        .y = a.y + b.y,
+        .z = a.z + b.z,
+    };
+}
+
+fn scaleVec3(v: q3.math.Vec3, amount: f32) q3.math.Vec3 {
+    return .{
+        .x = v.x * amount,
+        .y = v.y * amount,
+        .z = v.z * amount,
+    };
 }

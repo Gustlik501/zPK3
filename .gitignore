@@ -4,6 +4,7 @@ zig-out/
 .tmp/
 .cache/
 .inspect/
+imgui.ini
 assets/extracted/
 .idea/
 Project/*
