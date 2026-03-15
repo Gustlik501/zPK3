@@ -63,8 +63,6 @@ const MaterialRule = qscene.MaterialRule;
 const SurfaceBatch = struct {
     binding: MaterialBinding,
     model: rl.Model,
-    wire_positions: []f32,
-    material_name: []const u8,
     owner_bsp_model_index: usize,
     render_mode: RenderMode,
     use_lightmap: bool,
@@ -162,8 +160,6 @@ pub const SceneRenderer = struct {
             for (batch_list.items) |*batch| {
                 batch.binding.deinit(allocator);
                 rl.unloadModel(batch.model);
-                allocator.free(batch.wire_positions);
-                allocator.free(batch.material_name);
             }
             batch_list.deinit(allocator);
         }
@@ -177,10 +173,6 @@ pub const SceneRenderer = struct {
         for (extracted_scene.batches) |*batch| {
             const mesh = try loadMeshFromBatch(batch);
             var model = try rl.loadModelFromMesh(mesh);
-            const wire_positions = try allocator.dupe(f32, batch.positions);
-            errdefer allocator.free(wire_positions);
-            const material_name = try allocator.dupe(u8, batch.texture_name);
-            errdefer allocator.free(material_name);
             const binding = try texture_cache.buildMaterialBinding(batch.texture_name);
             errdefer {
                 var owned_binding = binding;
@@ -196,8 +188,10 @@ pub const SceneRenderer = struct {
             }
 
             stats.geometry_memory_bytes += batchMemoryBytes(batch);
-            stats.wireframe_memory_bytes += wire_positions.len * @sizeOf(f32);
-            stats.material_memory_bytes += material_name.len + bindingMemoryBytes(binding);
+            stats.material_memory_bytes += bindingMemoryBytes(binding);
+
+            const freed_cpu_mesh_bytes = discardCpuMeshData(&model);
+            stats.geometry_memory_bytes -|= freed_cpu_mesh_bytes;
 
             model.materials[0].shader = lightmap_shader;
             model.materials[0].maps[@intFromEnum(rl.MATERIAL_MAP_DIFFUSE)].texture = texture;
@@ -205,8 +199,6 @@ pub const SceneRenderer = struct {
             try batch_list.append(allocator, .{
                 .binding = binding,
                 .model = model,
-                .wire_positions = wire_positions,
-                .material_name = material_name,
                 .owner_bsp_model_index = batch.owner_bsp_model_index,
                 .render_mode = batch.render_mode,
                 .use_lightmap = batch.use_lightmap,
@@ -238,8 +230,6 @@ pub const SceneRenderer = struct {
         for (self.batches) |*batch| {
             batch.binding.deinit(self.allocator);
             rl.unloadModel(batch.model);
-            self.allocator.free(batch.wire_positions);
-            self.allocator.free(batch.material_name);
         }
         self.allocator.free(self.batches);
         for (self.scene_objects) |*object| object.deinit(self.allocator);
@@ -383,13 +373,13 @@ pub const SceneRenderer = struct {
             }
 
             if (self.draw_wireframe) {
-                drawWireTriangles(batch.wire_positions, .{ .r = 96, .g = 255, .b = 128, .a = 255 });
+                drawModelWireTriangles(batch.model, .{ .r = 96, .g = 255, .b = 128, .a = 255 });
             } else {
                 rl.drawModel(batch.model, .{ .x = 0, .y = 0, .z = 0 }, 1.0, .white);
             }
 
             self.stats.drawn_batch_count += 1;
-            self.stats.drawn_vertex_count += batch.wire_positions.len / 3;
+            self.stats.drawn_vertex_count += vertexCountForModel(batch.model);
         }
     }
 
@@ -1198,7 +1188,13 @@ fn loadMeshFromBatch(batch: *const qscene.SurfaceBatch) !rl.Mesh {
     return mesh;
 }
 
-fn drawWireTriangles(positions: []const f32, color: rl.Color) void {
+fn drawModelWireTriangles(model: rl.Model, color: rl.Color) void {
+    if (model.meshCount <= 0 or model.meshes == null) return;
+    const mesh = model.meshes[0];
+    if (mesh.vertices == null or mesh.vertexCount < 3) return;
+
+    const vertex_count: usize = @intCast(mesh.vertexCount);
+    const positions = mesh.vertices[0 .. vertex_count * 3];
     if (positions.len < 9) return;
 
     const previous_width = rlgl.rlGetLineWidth();
@@ -1234,6 +1230,16 @@ fn drawWireTriangles(positions: []const f32, color: rl.Color) void {
     }
 }
 
+fn vertexCountForModel(model: rl.Model) usize {
+    if (model.meshCount <= 0 or model.meshes == null) return 0;
+    var total: usize = 0;
+    const mesh_count: usize = @intCast(model.meshCount);
+    for (model.meshes[0..mesh_count]) |mesh| {
+        if (mesh.vertexCount > 0) total += @intCast(mesh.vertexCount);
+    }
+    return total;
+}
+
 fn batchMemoryBytes(batch: *const qscene.SurfaceBatch) usize {
     return batch.positions.len * @sizeOf(f32) +
         batch.texcoords.len * @sizeOf(f32) +
@@ -1245,6 +1251,35 @@ fn batchMemoryBytes(batch: *const qscene.SurfaceBatch) usize {
 
 fn bindingMemoryBytes(binding: MaterialBinding) usize {
     return binding.animated_frames.len * @sizeOf(rl.Texture2D);
+}
+
+fn discardCpuMeshData(model: *rl.Model) usize {
+    if (model.meshCount <= 0 or model.meshes == null) return 0;
+
+    var freed_bytes: usize = 0;
+    const mesh_count: usize = @intCast(model.meshCount);
+    for (model.meshes[0..mesh_count]) |*mesh| {
+        freed_bytes += freeMeshPointer(&mesh.texcoords, mesh.vertexCount * 2, f32);
+        freed_bytes += freeMeshPointer(&mesh.texcoords2, mesh.vertexCount * 2, f32);
+        freed_bytes += freeMeshPointer(&mesh.normals, mesh.vertexCount * 3, f32);
+        freed_bytes += freeMeshPointer(&mesh.tangents, mesh.vertexCount * 4, f32);
+        freed_bytes += freeMeshPointer(&mesh.colors, mesh.vertexCount * 4, u8);
+        freed_bytes += freeMeshPointer(&mesh.indices, mesh.triangleCount * 3, c_ushort);
+        freed_bytes += freeMeshPointer(&mesh.animVertices, mesh.vertexCount * 3, f32);
+        freed_bytes += freeMeshPointer(&mesh.animNormals, mesh.vertexCount * 3, f32);
+        freed_bytes += freeMeshPointer(&mesh.boneIds, mesh.vertexCount * 4, u8);
+        freed_bytes += freeMeshPointer(&mesh.boneWeights, mesh.vertexCount * 4, f32);
+        freed_bytes += freeMeshPointer(&mesh.boneMatrices, mesh.boneCount, rl.Matrix);
+    }
+
+    return freed_bytes;
+}
+
+fn freeMeshPointer(ptr: anytype, count: c_int, comptime T: type) usize {
+    if (ptr.* == null or count <= 0) return 0;
+    rl.memFree(@ptrCast(ptr.*));
+    ptr.* = null;
+    return @as(usize, @intCast(count)) * @sizeOf(T);
 }
 
 fn textureMemoryBytesEstimate(texture: rl.Texture2D) usize {
