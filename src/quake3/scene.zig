@@ -25,6 +25,8 @@ pub const SceneStats = struct {
     lightmap_memory_bytes: usize = 0,
     pvs_visible_world_batch_count: usize = 0,
     pvs_culled_world_batch_count: usize = 0,
+    frustum_visible_world_batch_count: usize = 0,
+    frustum_culled_world_batch_count: usize = 0,
 };
 
 pub const RenderMode = enum {
@@ -50,6 +52,8 @@ pub const SurfaceBatch = struct {
     double_sided: bool,
     alpha_cutoff: f32,
     visible_clusters: []u8,
+    bounds_min: qmath.Vec3,
+    bounds_max: qmath.Vec3,
     positions: []f32,
     texcoords: []f32,
     texcoords2: []f32,
@@ -227,6 +231,9 @@ const MeshBuilder = struct {
     lightmap_index: i32,
     rule: MaterialRule,
     visible_clusters: []u8,
+    bounds_min: qmath.Vec3,
+    bounds_max: qmath.Vec3,
+    has_bounds: bool = false,
     positions: std.ArrayList(f32),
     texcoords: std.ArrayList(f32),
     texcoords2: std.ArrayList(f32),
@@ -256,6 +263,8 @@ const MeshBuilder = struct {
             .lightmap_index = lightmap_index,
             .rule = rule,
             .visible_clusters = visible_clusters,
+            .bounds_min = undefined,
+            .bounds_max = undefined,
             .positions = .empty,
             .texcoords = .empty,
             .texcoords2 = .empty,
@@ -451,6 +460,7 @@ const MeshBuilder = struct {
     fn appendVertex(self: *MeshBuilder, vertex: SampledVertex) !void {
         const position = bsp.toEngineSpace(vertex.position);
         const normal = normalizeVector(bsp.toEngineNormal(vertex.normal));
+        self.expandBounds(position);
 
         try self.positions.appendSlice(self.allocator, &.{ position.x, position.y, position.z });
         try self.texcoords.appendSlice(self.allocator, &.{ vertex.texcoord[0], 1.0 - vertex.texcoord[1] });
@@ -492,6 +502,8 @@ const MeshBuilder = struct {
             .double_sided = self.rule.double_sided,
             .alpha_cutoff = self.rule.alpha_cutoff,
             .visible_clusters = visible_clusters,
+            .bounds_min = self.bounds_min,
+            .bounds_max = self.bounds_max,
             .positions = positions,
             .texcoords = texcoords,
             .texcoords2 = texcoords2,
@@ -499,6 +511,21 @@ const MeshBuilder = struct {
             .colors = colors,
             .vertex_count = self.vertex_count,
         };
+    }
+
+    fn expandBounds(self: *MeshBuilder, position: qmath.Vec3) void {
+        if (!self.has_bounds) {
+            self.bounds_min = position;
+            self.bounds_max = position;
+            self.has_bounds = true;
+            return;
+        }
+        self.bounds_min.x = @min(self.bounds_min.x, position.x);
+        self.bounds_min.y = @min(self.bounds_min.y, position.y);
+        self.bounds_min.z = @min(self.bounds_min.z, position.z);
+        self.bounds_max.x = @max(self.bounds_max.x, position.x);
+        self.bounds_max.y = @max(self.bounds_max.y, position.y);
+        self.bounds_max.z = @max(self.bounds_max.z, position.z);
     }
 };
 

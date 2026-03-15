@@ -1,5 +1,6 @@
 const std = @import("std");
 const rl = @import("raylib");
+const raymath = rl.math;
 const rlgl = rl.gl;
 const archive = @import("archive.zig");
 const bsp = @import("bsp.zig");
@@ -69,6 +70,94 @@ const SurfaceBatch = struct {
     double_sided: bool,
     alpha_cutoff: f32,
     visible_clusters: []u8,
+    bounds: rl.BoundingBox,
+};
+
+const Plane = struct {
+    normal: rl.Vector3,
+    distance: f32,
+
+    fn normalize(self: Plane) Plane {
+        const length = @sqrt(
+            self.normal.x * self.normal.x +
+                self.normal.y * self.normal.y +
+                self.normal.z * self.normal.z,
+        );
+        if (length <= 0.0001) return self;
+        return .{
+            .normal = .{
+                .x = self.normal.x / length,
+                .y = self.normal.y / length,
+                .z = self.normal.z / length,
+            },
+            .distance = self.distance / length,
+        };
+    }
+
+    fn distanceToPoint(self: Plane, point: rl.Vector3) f32 {
+        return self.normal.x * point.x +
+            self.normal.y * point.y +
+            self.normal.z * point.z +
+            self.distance;
+    }
+};
+
+const CameraFrustum = struct {
+    planes: [6]Plane,
+
+    fn fromCamera(camera: rl.Camera) CameraFrustum {
+        const aspect = @as(f64, @floatFromInt(@max(rl.getScreenWidth(), 1))) /
+            @as(f64, @floatFromInt(@max(rl.getScreenHeight(), 1)));
+        const projection = switch (camera.projection) {
+            .orthographic => raymath.matrixOrtho(
+                -camera.fovy * aspect * 0.5,
+                camera.fovy * aspect * 0.5,
+                -@as(f64, camera.fovy) * 0.5,
+                @as(f64, camera.fovy) * 0.5,
+                0.01,
+                10_000.0,
+            ),
+            .perspective => raymath.matrixPerspective(
+                std.math.degreesToRadians(camera.fovy),
+                aspect,
+                0.01,
+                10_000.0,
+            ),
+        };
+        const view = camera.getMatrix();
+        const view_projection = raymath.matrixMultiply(projection, view);
+        return .{
+            .planes = .{
+                extractPlane(view_projection, .left),
+                extractPlane(view_projection, .right),
+                extractPlane(view_projection, .bottom),
+                extractPlane(view_projection, .top),
+                extractPlane(view_projection, .near),
+                extractPlane(view_projection, .far),
+            },
+        };
+    }
+
+    fn containsBox(self: CameraFrustum, bounds: rl.BoundingBox) bool {
+        for (self.planes) |plane| {
+            const point: rl.Vector3 = .{
+                .x = if (plane.normal.x >= 0.0) bounds.max.x else bounds.min.x,
+                .y = if (plane.normal.y >= 0.0) bounds.max.y else bounds.min.y,
+                .z = if (plane.normal.z >= 0.0) bounds.max.z else bounds.min.z,
+            };
+            if (plane.distanceToPoint(point) < 0.0) return false;
+        }
+        return true;
+    }
+};
+
+const PlaneKind = enum {
+    left,
+    right,
+    bottom,
+    top,
+    near,
+    far,
 };
 
 const MaterialBinding = struct {
@@ -137,6 +226,7 @@ pub const SceneRenderer = struct {
     fullbright: bool = false,
     backface_culling: bool = true,
     visibility_culling: bool = true,
+    frustum_culling: bool = true,
     draw_scene_objects: bool = true,
     draw_world_geometry: bool = true,
     draw_submodel_geometry: bool = true,
@@ -144,6 +234,7 @@ pub const SceneRenderer = struct {
     selected_scene_object_index: ?usize = null,
     last_camera_leaf_index: ?usize = null,
     last_camera_cluster: i32 = -1,
+    last_camera_frustum: CameraFrustum = undefined,
 
     pub fn init(allocator: std.mem.Allocator, packs: *archive.Pk3Collection, map: *const bsp.Map) !SceneRenderer {
         var texture_cache = try TextureCache.init(allocator, packs);
@@ -214,6 +305,10 @@ pub const SceneRenderer = struct {
                 .double_sided = batch.double_sided,
                 .alpha_cutoff = batch.alpha_cutoff,
                 .visible_clusters = visible_clusters,
+                .bounds = .{
+                    .min = toRlVector3(batch.bounds_min),
+                    .max = toRlVector3(batch.bounds_max),
+                },
             });
         }
 
@@ -282,7 +377,10 @@ pub const SceneRenderer = struct {
         self.stats.drawn_vertex_count = 0;
         self.stats.pvs_visible_world_batch_count = 0;
         self.stats.pvs_culled_world_batch_count = 0;
+        self.stats.frustum_visible_world_batch_count = 0;
+        self.stats.frustum_culled_world_batch_count = 0;
         self.updateVisibilityState(camera.position);
+        self.last_camera_frustum = CameraFrustum.fromCamera(camera);
 
         self.drawBatches(.solid);
         self.drawBatches(.alpha);
@@ -363,32 +461,62 @@ pub const SceneRenderer = struct {
     }
 
     fn isBatchVisible(self: *SceneRenderer, batch: *const SurfaceBatch) bool {
-        if (!self.visibility_culling) return true;
         if (batch.owner_bsp_model_index != 0) return true;
-        if (self.map.visdata == null or batch.visible_clusters.len == 0) return true;
 
-        const camera_cluster = self.last_camera_cluster;
-        if (camera_cluster < 0) return true;
-        const camera_cluster_index: usize = @intCast(camera_cluster);
+        if (self.visibility_culling and self.map.visdata != null and batch.visible_clusters.len != 0) {
+            const camera_cluster = self.last_camera_cluster;
+            if (camera_cluster >= 0) {
+                const camera_cluster_index: usize = @intCast(camera_cluster);
 
-        if (camera_cluster_index / 8 < batch.visible_clusters.len) {
-            const mask: u8 = @as(u8, 1) << @intCast(camera_cluster_index & 7);
-            if ((batch.visible_clusters[camera_cluster_index / 8] & mask) != 0) return true;
-        }
+                if (camera_cluster_index / 8 < batch.visible_clusters.len) {
+                    const mask: u8 = @as(u8, 1) << @intCast(camera_cluster_index & 7);
+                    if ((batch.visible_clusters[camera_cluster_index / 8] & mask) != 0) {
+                        if (!self.isBatchInsideFrustum(batch)) {
+                            self.stats.frustum_culled_world_batch_count += 1;
+                            return false;
+                        }
+                        self.stats.pvs_visible_world_batch_count += 1;
+                        self.stats.frustum_visible_world_batch_count += 1;
+                        return true;
+                    }
+                }
 
-        for (batch.visible_clusters, 0..) |byte, byte_index| {
-            if (byte == 0) continue;
-            var bit: usize = 0;
-            while (bit < 8) : (bit += 1) {
-                const mask: u8 = @as(u8, 1) << @intCast(bit);
-                if ((byte & mask) == 0) continue;
+                for (batch.visible_clusters, 0..) |byte, byte_index| {
+                    if (byte == 0) continue;
+                    var bit: usize = 0;
+                    while (bit < 8) : (bit += 1) {
+                        const mask: u8 = @as(u8, 1) << @intCast(bit);
+                        if ((byte & mask) == 0) continue;
 
-                const cluster_index = byte_index * 8 + bit;
-                if (self.map.isClusterVisible(camera_cluster, @intCast(cluster_index))) return true;
+                        const cluster_index = byte_index * 8 + bit;
+                        if (!self.map.isClusterVisible(camera_cluster, @intCast(cluster_index))) continue;
+                        if (!self.isBatchInsideFrustum(batch)) {
+                            self.stats.frustum_culled_world_batch_count += 1;
+                            return false;
+                        }
+                        self.stats.pvs_visible_world_batch_count += 1;
+                        self.stats.frustum_visible_world_batch_count += 1;
+                        return true;
+                    }
+                }
+
+                self.stats.pvs_culled_world_batch_count += 1;
+                return false;
             }
         }
 
-        return false;
+        if (!self.isBatchInsideFrustum(batch)) {
+            self.stats.frustum_culled_world_batch_count += 1;
+            return false;
+        }
+
+        self.stats.frustum_visible_world_batch_count += 1;
+        return true;
+    }
+
+    fn isBatchInsideFrustum(self: *const SceneRenderer, batch: *const SurfaceBatch) bool {
+        if (!self.frustum_culling) return true;
+        return self.last_camera_frustum.containsBox(batch.bounds);
     }
 
     fn drawBatches(self: *SceneRenderer, mode: RenderMode) void {
@@ -407,21 +535,12 @@ pub const SceneRenderer = struct {
             if (batch.render_mode != mode) continue;
             if (batch.owner_bsp_model_index == 0 and !self.draw_world_geometry) continue;
             if (batch.owner_bsp_model_index != 0 and !self.draw_submodel_geometry) continue;
-            if (!self.isBatchVisible(batch)) {
-                if (batch.owner_bsp_model_index == 0) {
-                    self.stats.pvs_culled_world_batch_count += 1;
-                }
-                continue;
-            }
+            if (!self.isBatchVisible(batch)) continue;
             if (self.isolate_selected_submodel) {
                 if (self.selectedBspModelIndex()) |model_index| {
                     if (batch.owner_bsp_model_index != model_index) continue;
                 }
             }
-            if (batch.owner_bsp_model_index == 0) {
-                self.stats.pvs_visible_world_batch_count += 1;
-            }
-
             const use_lightmap: i32 = if (self.fullbright or self.draw_wireframe or !batch.use_lightmap) 0 else 1;
             const lightmap_scale: f32 = if (self.fullbright or self.draw_wireframe or !batch.use_lightmap) 1.0 else 2.0;
             rl.setShaderValue(self.lightmap_shader, self.lightmap_use_loc, &use_lightmap, .int);
@@ -493,6 +612,34 @@ pub const SceneRenderer = struct {
         return object.bsp_model_index;
     }
 };
+
+fn extractPlane(matrix: rl.Matrix, kind: PlaneKind) Plane {
+    const row0 = [4]f32{ matrix.m0, matrix.m4, matrix.m8, matrix.m12 };
+    const row1 = [4]f32{ matrix.m1, matrix.m5, matrix.m9, matrix.m13 };
+    const row2 = [4]f32{ matrix.m2, matrix.m6, matrix.m10, matrix.m14 };
+    const row3 = [4]f32{ matrix.m3, matrix.m7, matrix.m11, matrix.m15 };
+
+    const values = switch (kind) {
+        .left => addRows(row3, row0),
+        .right => subtractRows(row3, row0),
+        .bottom => addRows(row3, row1),
+        .top => subtractRows(row3, row1),
+        .near => addRows(row3, row2),
+        .far => subtractRows(row3, row2),
+    };
+    return (Plane{
+        .normal = .{ .x = values[0], .y = values[1], .z = values[2] },
+        .distance = values[3],
+    }).normalize();
+}
+
+fn addRows(a: [4]f32, b: [4]f32) [4]f32 {
+    return .{ a[0] + b[0], a[1] + b[1], a[2] + b[2], a[3] + b[3] };
+}
+
+fn subtractRows(a: [4]f32, b: [4]f32) [4]f32 {
+    return .{ a[0] - b[0], a[1] - b[1], a[2] - b[2], a[3] - b[3] };
+}
 
 const TextureCache = struct {
     allocator: std.mem.Allocator,

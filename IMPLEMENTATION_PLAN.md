@@ -89,9 +89,10 @@ This file is a working checklist for turning this repo into a PK3/BSP-native run
 
 ## Phase 8: Visibility and Lighting
 
-- [ ] Parse and expose BSP visibility data from `visdata`.
-- [ ] Add leaf/node traversal utilities.
-- [ ] Add PVS-based culling hooks for the renderer.
+- [x] Parse and expose BSP visibility data from `visdata`.
+- [x] Add leaf/node traversal utilities.
+- [x] Add PVS-based culling hooks for the renderer.
+- [x] Add frustum culling on top of world-batch visibility.
 - [ ] Parse and expose light volume data for dynamic object lighting.
 - [ ] Add viewer debug modes for leaves/PVS/light volumes.
 

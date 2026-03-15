@@ -428,6 +428,7 @@ fn drawInspector(
     _ = imgui.checkbox("Draw submodel geometry", &renderer.draw_submodel_geometry);
     _ = imgui.checkbox("Isolate selected BSP submodel", &renderer.isolate_selected_submodel);
     _ = imgui.checkbox("PVS visibility culling", &renderer.visibility_culling);
+    _ = imgui.checkbox("Frustum visibility culling", &renderer.frustum_culling);
     _ = imgui.checkbox("Wireframe renderer", &renderer.draw_wireframe);
     _ = imgui.checkbox("Fullbright renderer", &renderer.fullbright);
     _ = imgui.checkbox("Backface culling", &renderer.backface_culling);
@@ -697,13 +698,15 @@ fn drawRuntimeStatsWindow(
 
     const visibility_line = std.fmt.bufPrintZ(
         &line_buf,
-        "Visibility: pvs={s}  camera leaf={s}  cluster={d}  world visible={d}  world culled={d}",
+        "Visibility: pvs={s}  frustum={s}  leaf={s}  cluster={d}  world visible={d}  pvs culled={d}  frustum culled={d}",
         .{
             if (renderer.visibility_culling) "on" else "off",
+            if (renderer.frustum_culling) "on" else "off",
             if (renderer.last_camera_leaf_index != null) "yes" else "no",
             renderer.last_camera_cluster,
-            renderer.stats.pvs_visible_world_batch_count,
+            renderer.stats.frustum_visible_world_batch_count,
             renderer.stats.pvs_culled_world_batch_count,
+            renderer.stats.frustum_culled_world_batch_count,
         },
     ) catch return;
     imgui.text(visibility_line);
@@ -892,13 +895,15 @@ fn dumpStatsReport(
         },
     );
     std.debug.print(
-        "visibility: enabled={s} camera_leaf={?d} camera_cluster={d} world_visible={d} world_culled={d}\n",
+        "visibility: pvs={s} frustum={s} camera_leaf={?d} camera_cluster={d} world_visible={d} pvs_culled={d} frustum_culled={d}\n",
         .{
             if (renderer.visibility_culling) "true" else "false",
+            if (renderer.frustum_culling) "true" else "false",
             renderer.last_camera_leaf_index,
             renderer.last_camera_cluster,
-            renderer.stats.pvs_visible_world_batch_count,
+            renderer.stats.frustum_visible_world_batch_count,
             renderer.stats.pvs_culled_world_batch_count,
+            renderer.stats.frustum_culled_world_batch_count,
         },
     );
     std.debug.print(
