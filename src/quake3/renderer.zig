@@ -22,9 +22,10 @@ const lightmap_shader_vs: [:0]const u8 =
     \\out vec4 fragColor;
     \\
     \\uniform mat4 mvp;
+    \\uniform vec2 texOffset;
     \\
     \\void main() {
-    \\    fragTexCoord = vertexTexCoord;
+    \\    fragTexCoord = vertexTexCoord + texOffset;
     \\    fragTexCoord2 = vertexTexCoord2;
     \\    fragColor = vertexColor;
     \\    gl_Position = mvp * vec4(vertexPosition, 1.0);
@@ -44,9 +45,15 @@ const lightmap_shader_fs: [:0]const u8 =
     \\uniform int useLightmap;
     \\uniform float lightmapScale;
     \\uniform float alphaCutoff;
+    \\uniform vec4 materialColor;
+    \\uniform int useVertexRgb;
+    \\uniform int useVertexAlpha;
     \\
     \\void main() {
-    \\    vec4 albedo = texture(texture0, fragTexCoord) * fragColor;
+    \\    vec4 stageColor = materialColor;
+    \\    if (useVertexRgb == 1) stageColor.rgb *= fragColor.rgb;
+    \\    if (useVertexAlpha == 1) stageColor.a *= fragColor.a;
+    \\    vec4 albedo = texture(texture0, fragTexCoord) * stageColor;
     \\    if (albedo.a <= alphaCutoff) discard;
     \\    vec3 light = vec3(1.0);
     \\    if (useLightmap == 1) {
@@ -169,6 +176,10 @@ const MaterialBinding = struct {
     static_texture: rl.Texture2D,
     animated_frames: []rl.Texture2D = &.{},
     fps: f32 = 0.0,
+    uv_scroll: [2]f32 = .{ 0.0, 0.0 },
+    material_color: [4]f32 = .{ 1.0, 1.0, 1.0, 1.0 },
+    use_vertex_rgb: bool = false,
+    use_vertex_alpha: bool = false,
 
     fn deinit(self: *MaterialBinding, allocator: std.mem.Allocator) void {
         allocator.free(self.animated_frames);
@@ -189,6 +200,13 @@ const MaterialBinding = struct {
                 return self.animated_frames[frame_index];
             },
         }
+    }
+
+    fn currentUvOffset(self: *const MaterialBinding, time_seconds: f64) [2]f32 {
+        return .{
+            wrapUnitOffset(self.uv_scroll[0], time_seconds),
+            wrapUnitOffset(self.uv_scroll[1], time_seconds),
+        };
     }
 };
 
@@ -222,6 +240,10 @@ pub const SceneRenderer = struct {
     lightmap_use_loc: i32,
     lightmap_scale_loc: i32,
     alpha_cutoff_loc: i32,
+    material_color_loc: i32,
+    use_vertex_rgb_loc: i32,
+    use_vertex_alpha_loc: i32,
+    tex_offset_loc: i32,
     draw_wireframe: bool = false,
     fullbright: bool = false,
     backface_culling: bool = true,
@@ -329,6 +351,10 @@ pub const SceneRenderer = struct {
             .lightmap_use_loc = rl.getShaderLocation(lightmap_shader, "useLightmap"),
             .lightmap_scale_loc = rl.getShaderLocation(lightmap_shader, "lightmapScale"),
             .alpha_cutoff_loc = rl.getShaderLocation(lightmap_shader, "alphaCutoff"),
+            .material_color_loc = rl.getShaderLocation(lightmap_shader, "materialColor"),
+            .use_vertex_rgb_loc = rl.getShaderLocation(lightmap_shader, "useVertexRgb"),
+            .use_vertex_alpha_loc = rl.getShaderLocation(lightmap_shader, "useVertexAlpha"),
+            .tex_offset_loc = rl.getShaderLocation(lightmap_shader, "texOffset"),
         };
     }
 
@@ -546,6 +572,13 @@ pub const SceneRenderer = struct {
             rl.setShaderValue(self.lightmap_shader, self.lightmap_use_loc, &use_lightmap, .int);
             rl.setShaderValue(self.lightmap_shader, self.lightmap_scale_loc, &lightmap_scale, .float);
             rl.setShaderValue(self.lightmap_shader, self.alpha_cutoff_loc, &batch.alpha_cutoff, .float);
+            rl.setShaderValue(self.lightmap_shader, self.material_color_loc, &batch.binding.material_color, .vec4);
+            const use_vertex_rgb: i32 = if (batch.binding.use_vertex_rgb) 1 else 0;
+            const use_vertex_alpha: i32 = if (batch.binding.use_vertex_alpha) 1 else 0;
+            rl.setShaderValue(self.lightmap_shader, self.use_vertex_rgb_loc, &use_vertex_rgb, .int);
+            rl.setShaderValue(self.lightmap_shader, self.use_vertex_alpha_loc, &use_vertex_alpha, .int);
+            const tex_offset = batch.binding.currentUvOffset(time_seconds);
+            rl.setShaderValue(self.lightmap_shader, self.tex_offset_loc, &tex_offset, .vec2);
 
             const texture = batch.binding.currentTexture(time_seconds);
             batch.model.materials[0].maps[@intFromEnum(rl.MATERIAL_MAP_DIFFUSE)].texture = texture;
@@ -639,6 +672,12 @@ fn addRows(a: [4]f32, b: [4]f32) [4]f32 {
 
 fn subtractRows(a: [4]f32, b: [4]f32) [4]f32 {
     return .{ a[0] - b[0], a[1] - b[1], a[2] - b[2], a[3] - b[3] };
+}
+
+fn wrapUnitOffset(speed: f32, time_seconds: f64) f32 {
+    if (speed == 0.0) return 0.0;
+    const value = @as(f64, speed) * time_seconds;
+    return @floatCast(value - @floor(value));
 }
 
 const TextureCache = struct {
@@ -807,6 +846,10 @@ const TextureCache = struct {
                             .static_texture = frames[0],
                             .animated_frames = frames,
                             .fps = stage.fps,
+                            .uv_scroll = stage.tcmod_scroll,
+                            .material_color = stage.const_color,
+                            .use_vertex_rgb = stage.rgb_gen == .vertex,
+                            .use_vertex_alpha = stage.alpha_gen == .vertex,
                         };
                     },
                     .map, .clampmap => {
@@ -816,6 +859,10 @@ const TextureCache = struct {
                             return .{
                                 .mode = .static,
                                 .static_texture = texture,
+                                .uv_scroll = stage.tcmod_scroll,
+                                .material_color = stage.const_color,
+                                .use_vertex_rgb = stage.rgb_gen == .vertex,
+                                .use_vertex_alpha = stage.alpha_gen == .vertex,
                             };
                         }
                     },
@@ -861,6 +908,9 @@ const TextureCache = struct {
                 if (stage.map_kind == .lightmap) continue;
                 if (stage.alpha_cutout) {
                     rule.alpha_cutoff = @max(rule.alpha_cutoff, 0.5);
+                }
+                if (stage.alpha_gen == .constant and stage.const_color[3] < 1.0 and rule.render_mode == .solid) {
+                    rule.render_mode = .alpha;
                 }
 
                 switch (stage.blend_mode) {

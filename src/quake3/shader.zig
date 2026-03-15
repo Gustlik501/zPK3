@@ -21,11 +21,28 @@ pub const MapKind = enum {
     lightmap,
 };
 
+pub const ColorGen = enum {
+    identity,
+    identity_lighting,
+    vertex,
+    constant,
+};
+
+pub const AlphaGen = enum {
+    identity,
+    vertex,
+    constant,
+};
+
 pub const Stage = struct {
     map_kind: MapKind = .map,
     blend_mode: BlendMode = .solid,
     alpha_cutout: bool = false,
     fps: f32 = 0.0,
+    tcmod_scroll: [2]f32 = .{ 0.0, 0.0 },
+    rgb_gen: ColorGen = .identity,
+    alpha_gen: AlphaGen = .identity,
+    const_color: [4]f32 = .{ 1.0, 1.0, 1.0, 1.0 },
     texture: ?[]const u8 = null,
     anim_frames: [][]const u8 = &.{},
 
@@ -336,6 +353,56 @@ fn consumeStageLine(allocator: std.mem.Allocator, stage: *Stage, line: []const u
         return true;
     }
 
+    if (std.mem.eql(u8, keyword, "rgbgen") or std.mem.eql(u8, keyword, "rgbGen")) {
+        const mode = tokens.next() orelse return false;
+        if (std.mem.eql(u8, mode, "identity")) {
+            stage.rgb_gen = .identity;
+            return true;
+        }
+        if (std.mem.eql(u8, mode, "identitylighting") or std.mem.eql(u8, mode, "identityLighting")) {
+            stage.rgb_gen = .identity_lighting;
+            return true;
+        }
+        if (std.mem.eql(u8, mode, "vertex") or std.mem.eql(u8, mode, "exactvertex") or std.mem.eql(u8, mode, "exactVertex")) {
+            stage.rgb_gen = .vertex;
+            return true;
+        }
+        if (std.mem.eql(u8, mode, "const")) {
+            stage.rgb_gen = .constant;
+            stage.const_color[0] = std.fmt.parseFloat(f32, tokens.next() orelse return false) catch return false;
+            stage.const_color[1] = std.fmt.parseFloat(f32, tokens.next() orelse return false) catch return false;
+            stage.const_color[2] = std.fmt.parseFloat(f32, tokens.next() orelse return false) catch return false;
+            return true;
+        }
+        return false;
+    }
+
+    if (std.mem.eql(u8, keyword, "alphagen") or std.mem.eql(u8, keyword, "alphaGen")) {
+        const mode = tokens.next() orelse return false;
+        if (std.mem.eql(u8, mode, "identity")) {
+            stage.alpha_gen = .identity;
+            return true;
+        }
+        if (std.mem.eql(u8, mode, "vertex")) {
+            stage.alpha_gen = .vertex;
+            return true;
+        }
+        if (std.mem.eql(u8, mode, "const")) {
+            stage.alpha_gen = .constant;
+            stage.const_color[3] = std.fmt.parseFloat(f32, tokens.next() orelse return false) catch return false;
+            return true;
+        }
+        return false;
+    }
+
+    if (std.mem.eql(u8, keyword, "tcmod") or std.mem.eql(u8, keyword, "tcMod")) {
+        const mode = tokens.next() orelse return false;
+        if (!std.mem.eql(u8, mode, "scroll")) return false;
+        stage.tcmod_scroll[0] = std.fmt.parseFloat(f32, tokens.next() orelse return false) catch return false;
+        stage.tcmod_scroll[1] = std.fmt.parseFloat(f32, tokens.next() orelse return false) catch return false;
+        return true;
+    }
+
     return false;
 }
 
@@ -434,4 +501,34 @@ test "parse shader definition with animmap and material flags" {
     try std.testing.expectEqual(@as(usize, 3), definition.stages[0].anim_frames.len);
     try std.testing.expectEqualStrings("textures/test/flame01.tga", definition.resolveImage(0.0).?);
     try std.testing.expectEqualStrings("textures/test/flame02.tga", definition.resolveImage(0.13).?);
+}
+
+test "parse shader stage color alpha and tcmod" {
+    const source =
+        \\textures/test/water
+        \\{
+        \\    {
+        \\        map textures/test/water01.tga
+        \\        rgbGen vertex
+        \\        alphaGen const 0.5
+        \\        tcMod scroll 0.25 -0.5
+        \\    }
+        \\}
+    ;
+
+    var library = Library{
+        .allocator = std.testing.allocator,
+        .definitions = std.StringHashMap(Definition).init(std.testing.allocator),
+    };
+    defer library.deinit();
+
+    try library.parseFile(source);
+
+    const definition = library.get("textures/test/water") orelse return error.TestExpectedEqual;
+    try std.testing.expectEqual(@as(usize, 1), definition.stages.len);
+    try std.testing.expect(definition.stages[0].rgb_gen == .vertex);
+    try std.testing.expect(definition.stages[0].alpha_gen == .constant);
+    try std.testing.expectEqual(@as(f32, 0.5), definition.stages[0].const_color[3]);
+    try std.testing.expectEqual(@as(f32, 0.25), definition.stages[0].tcmod_scroll[0]);
+    try std.testing.expectEqual(@as(f32, -0.5), definition.stages[0].tcmod_scroll[1]);
 }

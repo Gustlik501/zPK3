@@ -70,9 +70,9 @@ This file is a working checklist for turning this repo into a PK3/BSP-native run
 - [x] `animMap`
 - [x] `blendFunc`
 - [x] `alphaFunc`
-- [ ] `rgbGen`
-- [ ] `alphaGen`
-- [ ] `tcMod`
+- [x] `rgbGen`
+- [x] `alphaGen`
+- [x] `tcMod`
 - [x] `cull`
 - [x] `surfaceparm`
 - [ ] sky
