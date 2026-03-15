@@ -439,6 +439,7 @@ const TextureCache = struct {
     fallback_paths: std.StringHashMap([]const u8),
     fallback_ambiguous: std.StringHashMap(void),
     image_paths: std.ArrayList([]const u8),
+    fallback_index_built: bool = false,
     placeholder: rl.Texture2D,
     was_missing_last_load: bool = false,
 
@@ -459,11 +460,10 @@ const TextureCache = struct {
             .fallback_paths = std.StringHashMap([]const u8).init(allocator),
             .fallback_ambiguous = std.StringHashMap(void).init(allocator),
             .image_paths = .empty,
+            .fallback_index_built = false,
             .placeholder = try rl.loadTextureFromImage(image),
         };
         errdefer cache.deinit();
-
-        try cache.buildFallbackIndex();
         return cache;
     }
 
@@ -494,7 +494,6 @@ const TextureCache = struct {
         var fallback_it = self.fallback_paths.iterator();
         while (fallback_it.next()) |entry| {
             self.allocator.free(entry.key_ptr.*);
-            self.allocator.free(entry.value_ptr.*);
         }
         self.fallback_paths.deinit();
 
@@ -545,7 +544,7 @@ const TextureCache = struct {
 
         var fallback_it = self.fallback_paths.iterator();
         while (fallback_it.next()) |entry| {
-            total += entry.key_ptr.*.len + entry.value_ptr.*.len;
+            total += entry.key_ptr.*.len + @sizeOf([]const u8);
         }
 
         var ambiguous_it = self.fallback_ambiguous.iterator();
@@ -695,6 +694,12 @@ const TextureCache = struct {
         return null;
     }
 
+    fn ensureFallbackIndex(self: *TextureCache) !void {
+        if (self.fallback_index_built) return;
+        try self.buildFallbackIndex();
+        self.fallback_index_built = true;
+    }
+
     fn loadTextureFile(self: *TextureCache, cache_key: []const u8, target_name: []const u8) !?rl.Texture2D {
         if (std.fs.path.extension(target_name).len != 0) {
             const file_data = self.packs.readFileAlloc(self.allocator, target_name) catch return null;
@@ -752,17 +757,20 @@ const TextureCache = struct {
     }
 
     fn indexFallbackPath(self: *TextureCache, path: []const u8) !void {
-        try self.image_paths.append(self.allocator, try self.allocator.dupe(u8, path));
+        const stored_path = try self.allocator.dupe(u8, path);
+        errdefer self.allocator.free(stored_path);
+        try self.image_paths.append(self.allocator, stored_path);
+        errdefer _ = self.image_paths.pop();
 
         const basename = std.fs.path.basename(path);
-        try self.putFallbackKey(basename, path);
+        try self.putFallbackKey(basename, stored_path);
 
         const stem = basename[0 .. basename.len - std.fs.path.extension(basename).len];
-        try self.putFallbackKey(stem, path);
+        try self.putFallbackKey(stem, stored_path);
 
         const normalized_stem = normalizeLookupStem(stem);
         if (!std.mem.eql(u8, normalized_stem, stem)) {
-            try self.putFallbackKey(normalized_stem, path);
+            try self.putFallbackKey(normalized_stem, stored_path);
         }
     }
 
@@ -781,7 +789,6 @@ const TextureCache = struct {
             if (!std.mem.eql(u8, entry.value_ptr.*, path)) {
                 const removed = self.fallback_paths.fetchRemove(normalized_key).?;
                 self.allocator.free(removed.key);
-                self.allocator.free(removed.value);
                 try self.fallback_ambiguous.put(normalized_key, {});
             } else {
                 self.allocator.free(normalized_key);
@@ -789,10 +796,12 @@ const TextureCache = struct {
             return;
         }
 
-        try self.fallback_paths.put(normalized_key, try self.allocator.dupe(u8, path));
+        try self.fallback_paths.put(normalized_key, path);
     }
 
     fn findFallbackPath(self: *TextureCache, target_name: []const u8) ?[]const u8 {
+        self.ensureFallbackIndex() catch return null;
+
         const basename = std.fs.path.basename(target_name);
         const ext = std.fs.path.extension(basename);
         const stem = if (ext.len == 0) basename else basename[0 .. basename.len - ext.len];
