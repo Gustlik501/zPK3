@@ -94,7 +94,7 @@ pub fn run(allocator: std.mem.Allocator) !void {
         const world_draw_start_ns = std.time.nanoTimestamp();
         rl.beginMode3D(camera);
         renderer.draw(camera);
-        drawVisibilityDebug(&map, &renderer, &inspector.visibility);
+        drawVisibilityDebug(&map, &renderer, &camera, &inspector.visibility);
         drawCollisionDebug(&inspector.collision);
         rl.endMode3D();
         const world_draw_end_ns = std.time.nanoTimestamp();
@@ -421,6 +421,13 @@ const VisibilityDebugState = struct {
     max_visible_leaf_boxes: usize = 64,
 };
 
+const max_debug_leaf_boxes = 256;
+
+const VisibleLeafCandidate = struct {
+    leaf_index: usize,
+    distance_sq: f32,
+};
+
 fn drawInspector(
     map: *const q3.bsp.Map,
     collision_world: *const q3.collision.World,
@@ -503,7 +510,7 @@ fn drawVisibilityInspector(
     }
     imgui.sameLine();
     if (imgui.button("More leaf boxes")) {
-        state.max_visible_leaf_boxes += 8;
+        state.max_visible_leaf_boxes = @min(state.max_visible_leaf_boxes + 8, max_debug_leaf_boxes);
     }
 
     const summary = std.fmt.bufPrintZ(
@@ -521,8 +528,12 @@ fn drawVisibilityInspector(
         const visible_leaf_count = countVisibleLeaves(map, renderer.last_camera_cluster);
         const visible_line = std.fmt.bufPrintZ(
             &line_buf,
-            "Visible leaves in cluster set: {d}/{d}",
-            .{ visible_leaf_count, map.leaves.len },
+            "Visible leaves in cluster set: {d}/{d}  drawn: {d}",
+            .{
+                visible_leaf_count,
+                map.leaves.len,
+                @min(visible_leaf_count, state.max_visible_leaf_boxes),
+            },
         ) catch return;
         imgui.text(visible_line);
     } else {
@@ -1283,6 +1294,7 @@ fn drawCollisionInspector(
 fn drawVisibilityDebug(
     map: *const q3.bsp.Map,
     renderer: *const q3.renderer.SceneRenderer,
+    camera: *const rl.Camera,
     state: *const VisibilityDebugState,
 ) void {
     if (!state.draw_debug) return;
@@ -1297,15 +1309,26 @@ fn drawVisibilityDebug(
     if (!state.draw_pvs_leaves) return;
     if (renderer.last_camera_cluster < 0) return;
 
-    var drawn_count: usize = 0;
+    const camera_position = fromRlVector3(camera.position);
+    var nearest_candidates: [max_debug_leaf_boxes]VisibleLeafCandidate = undefined;
+    var candidate_count: usize = 0;
     for (map.leaves, 0..) |leaf, leaf_index| {
         if (current_leaf_index != null and leaf_index == current_leaf_index.?) continue;
         if (leaf.cluster < 0) continue;
         if (!map.isClusterVisible(renderer.last_camera_cluster, leaf.cluster)) continue;
 
-        rl.drawBoundingBox(leafBoundingBox(leaf), .sky_blue);
-        drawn_count += 1;
-        if (drawn_count >= state.max_visible_leaf_boxes) break;
+        const leaf_center = leafCenter(leaf);
+        const distance_sq = distanceSquared(camera_position, leaf_center);
+        insertVisibleLeafCandidate(
+            &nearest_candidates,
+            &candidate_count,
+            @min(state.max_visible_leaf_boxes, max_debug_leaf_boxes),
+            .{ .leaf_index = leaf_index, .distance_sq = distance_sq },
+        );
+    }
+
+    for (nearest_candidates[0..candidate_count]) |candidate| {
+        rl.drawBoundingBox(leafBoundingBox(map.leaves[candidate.leaf_index]), .sky_blue);
     }
 }
 
@@ -1402,6 +1425,34 @@ fn countVisibleLeaves(map: *const q3.bsp.Map, camera_cluster: i32) usize {
     return count;
 }
 
+fn insertVisibleLeafCandidate(
+    candidates: *[max_debug_leaf_boxes]VisibleLeafCandidate,
+    count: *usize,
+    max_count: usize,
+    candidate: VisibleLeafCandidate,
+) void {
+    if (max_count == 0) return;
+
+    if (count.* < max_count) {
+        candidates[count.*] = candidate;
+        count.* += 1;
+        sortVisibleLeafCandidates(candidates[0..count.*]);
+        return;
+    }
+
+    if (candidate.distance_sq >= candidates[max_count - 1].distance_sq) return;
+    candidates[max_count - 1] = candidate;
+    sortVisibleLeafCandidates(candidates[0..max_count]);
+}
+
+fn sortVisibleLeafCandidates(candidates: []VisibleLeafCandidate) void {
+    std.mem.sort(VisibleLeafCandidate, candidates, {}, struct {
+        fn lessThan(_: void, a: VisibleLeafCandidate, b: VisibleLeafCandidate) bool {
+            return a.distance_sq < b.distance_sq;
+        }
+    }.lessThan);
+}
+
 fn leafBoundingBox(leaf: q3.bsp.Leaf) rl.BoundingBox {
     const map_min = [3]f32{
         @floatFromInt(leaf.mins[0]),
@@ -1427,6 +1478,22 @@ fn leafBoundingBox(leaf: q3.bsp.Leaf) rl.BoundingBox {
             .z = @max(engine_min.z, engine_max.z),
         },
     };
+}
+
+fn leafCenter(leaf: q3.bsp.Leaf) q3.math.Vec3 {
+    const box = leafBoundingBox(leaf);
+    return .{
+        .x = (box.min.x + box.max.x) * 0.5,
+        .y = (box.min.y + box.max.y) * 0.5,
+        .z = (box.min.z + box.max.z) * 0.5,
+    };
+}
+
+fn distanceSquared(a: q3.math.Vec3, b: q3.math.Vec3) f32 {
+    const dx = a.x - b.x;
+    const dy = a.y - b.y;
+    const dz = a.z - b.z;
+    return dx * dx + dy * dy + dz * dz;
 }
 
 fn nsBetween(start_ns: i128, end_ns: i128) u64 {
