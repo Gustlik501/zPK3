@@ -43,36 +43,78 @@ pub fn run(allocator: std.mem.Allocator) !void {
     var camera = defaultCamera(toRlVector3(map.bounds_center));
     var controller = CameraController.init(camera);
     var inspector: InspectorState = .{};
+    var profiler: FrameProfiler = .{};
     rl.setTargetFPS(144);
 
     while (!rl.windowShouldClose()) {
+        const frame_start_ns = std.time.nanoTimestamp();
+
         if (rl.isKeyPressed(.f8)) {
             inspector.visible = !inspector.visible;
         }
+        if (rl.isKeyPressed(.f9)) {
+            inspector.stats_visible = !inspector.stats_visible;
+        }
 
+        const input_start_ns = std.time.nanoTimestamp();
         controller.update(&camera, inspector.capture_mouse, inspector.capture_keyboard);
+        const input_end_ns = std.time.nanoTimestamp();
+
+        const collision_start_ns = std.time.nanoTimestamp();
         updateCollisionDebugState(&inspector.collision, &collision_world, &map, &camera, &controller, &renderer);
+        const collision_end_ns = std.time.nanoTimestamp();
 
         rl.beginDrawing();
-        defer rl.endDrawing();
-
         rl.clearBackground(.{ .r = 10, .g = 8, .b = 6, .a = 255 });
+
+        const world_draw_start_ns = std.time.nanoTimestamp();
         rl.beginMode3D(camera);
         renderer.draw();
         drawCollisionDebug(&inspector.collision);
         rl.endMode3D();
+        const world_draw_end_ns = std.time.nanoTimestamp();
 
+        const ui_start_ns = std.time.nanoTimestamp();
         imgui.begin();
-        defer imgui.end();
-
         if (inspector.visible) {
-            drawInspector(&collision_world, &renderer, &camera, &controller, &inspector);
+            drawInspector(&collision_world, &renderer, &camera, &controller, &inspector, &profiler);
+        }
+        if (inspector.stats_visible) {
+            drawRuntimeStatsWindow(
+                &profiler,
+                map.path,
+                source_path,
+                &renderer,
+                entity_list.items.len,
+                validation.issueCount(),
+                inspector.visible,
+                &inspector.stats_visible,
+            );
         }
 
         inspector.capture_mouse = imgui.wantCaptureMouse();
         inspector.capture_keyboard = imgui.wantCaptureKeyboard();
+        imgui.end();
+        const ui_end_ns = std.time.nanoTimestamp();
 
-        drawOverlay(map, &renderer, source_path, entity_list.items.len, validation.issueCount(), inspector.visible);
+        const overlay_start_ns = std.time.nanoTimestamp();
+        drawOverlay(map.path, &renderer, inspector.visible, inspector.stats_visible);
+        const overlay_end_ns = std.time.nanoTimestamp();
+
+        const cpu_frame_end_ns = std.time.nanoTimestamp();
+        rl.endDrawing();
+        const frame_end_ns = std.time.nanoTimestamp();
+
+        profiler.record(.{
+            .input_ns = nsBetween(input_start_ns, input_end_ns),
+            .collision_ns = nsBetween(collision_start_ns, collision_end_ns),
+            .world_draw_ns = nsBetween(world_draw_start_ns, world_draw_end_ns),
+            .ui_ns = nsBetween(ui_start_ns, ui_end_ns),
+            .overlay_ns = nsBetween(overlay_start_ns, overlay_end_ns),
+            .cpu_frame_ns = nsBetween(frame_start_ns, cpu_frame_end_ns),
+            .present_wait_ns = nsBetween(cpu_frame_end_ns, frame_end_ns),
+            .total_frame_ns = nsBetween(frame_start_ns, frame_end_ns),
+        });
     }
 }
 
@@ -213,128 +255,34 @@ fn normalize(v: rl.Vector3) rl.Vector3 {
 }
 
 fn drawOverlay(
-    map: q3.bsp.Map,
+    map_path: []const u8,
     renderer: *const q3.renderer.SceneRenderer,
-    source_path: []const u8,
-    entity_count: usize,
-    validation_issue_count: usize,
     inspector_visible: bool,
+    stats_visible: bool,
 ) void {
-    const stats = renderer.stats;
-
-    rl.drawRectangle(12, 12, 660, 296, rl.fade(.black, 0.72));
-    rl.drawRectangleLines(12, 12, 660, 296, .dark_gray);
-    rl.drawText("Modular Quake 3 PK3 viewer", 24, 24, 24, .ray_white);
-
-    var line_buf: [384]u8 = undefined;
-
-    const map_line = std.fmt.bufPrintZ(&line_buf, "Map: {s}", .{map.path}) catch return;
-    rl.drawText(map_line, 24, 56, 18, .light_gray);
-
-    const stats_line = std.fmt.bufPrintZ(
+    var line_buf: [320]u8 = undefined;
+    const status_line = std.fmt.bufPrintZ(
         &line_buf,
-        "Batches: {d}  Faces: {d}  Draw verts: {d}  Missing textures: {d}",
-        .{ stats.batch_count, stats.face_count, stats.vertex_count, stats.missing_texture_count },
-    ) catch return;
-    rl.drawText(stats_line, 24, 78, 18, .light_gray);
-
-    const source_line = std.fmt.bufPrintZ(&line_buf, "PK3 source: {s}", .{source_path}) catch return;
-    rl.drawText(source_line, 24, 100, 18, .light_gray);
-
-    const runtime_line = std.fmt.bufPrintZ(
-        &line_buf,
-        "Entities: {d}  Validation issues: {d}",
-        .{ entity_count, validation_issue_count },
-    ) catch return;
-    rl.drawText(runtime_line, 24, 122, 18, if (validation_issue_count == 0) .light_gray else .orange);
-
-    const scene_line = std.fmt.bufPrintZ(
-        &line_buf,
-        "Scene models: {d}  BSP submodels: {d}  World batches: {d}  Submodel batches: {d}",
-        .{ stats.model_instance_count, stats.bsp_submodel_instance_count, stats.world_batch_count, stats.submodel_batch_count },
-    ) catch return;
-    rl.drawText(scene_line, 24, 144, 18, .light_gray);
-
-    const object_line = if (renderer.selectedSceneObject()) |object|
-        std.fmt.bufPrintZ(
-            &line_buf,
-            "Selected: {d}/{d} {s}  class={s}  model={s}  batches={d}",
-            .{
-                renderer.selected_scene_object_index.? + 1,
-                renderer.scene_objects.len,
-                switch (object.kind) {
-                    .bsp_submodel => "bsp_submodel",
-                    .external_model => "external_model",
-                },
-                object.classname,
-                object.model_path orelse "-",
-                renderer.selectedSceneObjectBatchCount(),
-            },
-        ) catch return
-    else
-        std.fmt.bufPrintZ(&line_buf, "Selected: none  Scene objects: {d}", .{renderer.scene_objects.len}) catch return;
-    rl.drawText(object_line, 24, 166, 18, .light_gray);
-
-    const object_detail_line = if (renderer.selectedSceneObject()) |object|
-        if (object.bsp_model_index) |index|
-            std.fmt.bufPrintZ(
-                &line_buf,
-                "Entity={d}  Target={s}  Origin=({d:.1}, {d:.1}, {d:.1})  BSP model={d}",
-                .{
-                    object.entity_index,
-                    object.targetname orelse "-",
-                    object.origin.x,
-                    object.origin.y,
-                    object.origin.z,
-                    index,
-                },
-            ) catch return
-        else
-            std.fmt.bufPrintZ(
-                &line_buf,
-                "Entity={d}  Target={s}  Origin=({d:.1}, {d:.1}, {d:.1})",
-                .{
-                    object.entity_index,
-                    object.targetname orelse "-",
-                    object.origin.x,
-                    object.origin.y,
-                    object.origin.z,
-                },
-            ) catch return
-    else
-        std.fmt.bufPrintZ(
-            &line_buf,
-            "Render toggles: world={s} submodels={s} isolate={s} objects={s}",
-            .{
-                if (renderer.draw_world_geometry) "on" else "off",
-                if (renderer.draw_submodel_geometry) "on" else "off",
-                if (renderer.isolate_selected_submodel) "on" else "off",
-                if (renderer.draw_scene_objects) "on" else "off",
-            },
-        ) catch return;
-    rl.drawText(object_detail_line, 24, 188, 18, .light_gray);
-
-    const ui_line = std.fmt.bufPrintZ(&line_buf, "UI: inspector={s}", .{if (inspector_visible) "on" else "off"}) catch return;
-    rl.drawText(ui_line, 24, 210, 18, .gray);
-
-    const debug_line = std.fmt.bufPrintZ(
-        &line_buf,
-        "Debug: wire={s} fullbright={s} cull={s} objects={s}",
+        "{s}  {d} FPS  inspector={s} stats={s}  world={s} submodels={s}",
         .{
-            if (renderer.draw_wireframe) "on" else "off",
-            if (renderer.fullbright) "on" else "off",
-            if (renderer.backface_culling) "on" else "off",
-            if (renderer.draw_scene_objects) "on" else "off",
+            map_path,
+            rl.getFPS(),
+            if (inspector_visible) "on" else "off",
+            if (stats_visible) "on" else "off",
+            if (renderer.draw_world_geometry) "on" else "off",
+            if (renderer.draw_submodel_geometry) "on" else "off",
         },
     ) catch return;
-    rl.drawText(debug_line, 24, 232, 18, if (renderer.draw_wireframe) .orange else .gray);
 
-    rl.drawText("Controls: RMB look, WASD fly, E/Q up-down, Shift boost, wheel FOV, Tab cycle objects", 24, 254, 18, .gray);
-    rl.drawText("F1 wire, F2 fullbright, F3 cull, F4 objects, F5 world, F6 submodels, F7 isolate, F8 inspector", 24, 276, 18, .gray);
+    rl.drawRectangle(12, 12, 720, 54, rl.fade(.black, 0.52));
+    rl.drawRectangleLines(12, 12, 720, 54, .dark_gray);
+    rl.drawText(status_line, 24, 24, 18, .light_gray);
+    rl.drawText("RMB look  WASD fly  E/Q up-down  Tab objects  F1-F7 render toggles  F8 inspector  F9 stats", 24, 44, 16, .gray);
 }
 
 const InspectorState = struct {
     visible: bool = true,
+    stats_visible: bool = true,
     capture_mouse: bool = false,
     capture_keyboard: bool = false,
     collision: CollisionDebugState = .{},
@@ -346,6 +294,7 @@ fn drawInspector(
     camera: *rl.Camera,
     controller: *CameraController,
     inspector: *InspectorState,
+    profiler: *const FrameProfiler,
 ) void {
     imgui.setNextWindowSize(430.0, 620.0);
     const open = imgui.beginWindow("Scene Inspector", &inspector.visible);
@@ -359,6 +308,7 @@ fn drawInspector(
     _ = imgui.checkbox("Wireframe renderer", &renderer.draw_wireframe);
     _ = imgui.checkbox("Fullbright renderer", &renderer.fullbright);
     _ = imgui.checkbox("Backface culling", &renderer.backface_culling);
+    _ = imgui.checkbox("Show runtime stats window", &inspector.stats_visible);
 
     if (imgui.button("Previous")) renderer.selectPreviousSceneObject();
     imgui.sameLine();
@@ -393,7 +343,184 @@ fn drawInspector(
     drawInspectorDetails(renderer);
 
     imgui.separator();
+    drawQuickPerformanceSummary(profiler);
+
+    imgui.separator();
     drawCollisionInspector(collision_world, renderer, camera, controller, &inspector.collision);
+}
+
+const FrameSample = struct {
+    input_ns: u64 = 0,
+    collision_ns: u64 = 0,
+    world_draw_ns: u64 = 0,
+    ui_ns: u64 = 0,
+    overlay_ns: u64 = 0,
+    cpu_frame_ns: u64 = 0,
+    present_wait_ns: u64 = 0,
+    total_frame_ns: u64 = 0,
+};
+
+const FrameMetric = struct {
+    current_ms: f32 = 0.0,
+    smoothed_ms: f32 = 0.0,
+
+    fn record(self: *FrameMetric, ns: u64) void {
+        const ms = @as(f32, @floatFromInt(ns)) / 1_000_000.0;
+        self.current_ms = ms;
+        self.smoothed_ms = if (self.smoothed_ms == 0.0) ms else self.smoothed_ms * 0.88 + ms * 0.12;
+    }
+};
+
+const FrameProfiler = struct {
+    input: FrameMetric = .{},
+    collision: FrameMetric = .{},
+    world_draw: FrameMetric = .{},
+    ui: FrameMetric = .{},
+    overlay: FrameMetric = .{},
+    cpu_frame: FrameMetric = .{},
+    present_wait: FrameMetric = .{},
+    total_frame: FrameMetric = .{},
+
+    fn record(self: *FrameProfiler, sample: FrameSample) void {
+        self.input.record(sample.input_ns);
+        self.collision.record(sample.collision_ns);
+        self.world_draw.record(sample.world_draw_ns);
+        self.ui.record(sample.ui_ns);
+        self.overlay.record(sample.overlay_ns);
+        self.cpu_frame.record(sample.cpu_frame_ns);
+        self.present_wait.record(sample.present_wait_ns);
+        self.total_frame.record(sample.total_frame_ns);
+    }
+};
+
+fn drawRuntimeStatsWindow(
+    profiler: *const FrameProfiler,
+    map_path: []const u8,
+    source_path: []const u8,
+    renderer: *const q3.renderer.SceneRenderer,
+    entity_count: usize,
+    validation_issue_count: usize,
+    inspector_visible: bool,
+    stats_visible: *bool,
+) void {
+    imgui.setNextWindowSize(470.0, 420.0);
+    const open = imgui.beginWindow("Runtime Stats", stats_visible);
+    defer imgui.endWindow();
+    if (!open) return;
+
+    var line_buf: [320]u8 = undefined;
+    const frame_line = std.fmt.bufPrintZ(
+        &line_buf,
+        "FPS {d}  frame {d:.2} ms  CPU {d:.2} ms  present {d:.2} ms",
+        .{
+            rl.getFPS(),
+            rl.getFrameTime() * 1000.0,
+            profiler.cpu_frame.current_ms,
+            profiler.present_wait.current_ms,
+        },
+    ) catch return;
+    imgui.text(frame_line);
+
+    drawMetricLine("Input", profiler.input, profiler.total_frame.current_ms);
+    drawMetricLine("Collision", profiler.collision, profiler.total_frame.current_ms);
+    drawMetricLine("World draw", profiler.world_draw, profiler.total_frame.current_ms);
+    drawMetricLine("ImGui", profiler.ui, profiler.total_frame.current_ms);
+    drawMetricLine("Overlay", profiler.overlay, profiler.total_frame.current_ms);
+    drawMetricLine("CPU frame", profiler.cpu_frame, profiler.total_frame.current_ms);
+    drawMetricLine("Present/wait", profiler.present_wait, profiler.total_frame.current_ms);
+
+    imgui.separator();
+
+    const map_line = std.fmt.bufPrintZ(&line_buf, "Map: {s}", .{map_path}) catch return;
+    imgui.text(map_line);
+    const source_line = std.fmt.bufPrintZ(&line_buf, "PK3 source: {s}", .{source_path}) catch return;
+    imgui.text(source_line);
+
+    const content_line = std.fmt.bufPrintZ(
+        &line_buf,
+        "Entities: {d}  Validation issues: {d}  Scene objects: {d}",
+        .{ entity_count, validation_issue_count, renderer.scene_objects.len },
+    ) catch return;
+    imgui.text(content_line);
+
+    const batch_line = std.fmt.bufPrintZ(
+        &line_buf,
+        "Batches: {d}  Faces: {d}  Draw verts: {d}  Missing textures: {d}",
+        .{
+            renderer.stats.batch_count,
+            renderer.stats.face_count,
+            renderer.stats.vertex_count,
+            renderer.stats.missing_texture_count,
+        },
+    ) catch return;
+    imgui.text(batch_line);
+
+    const scene_line = std.fmt.bufPrintZ(
+        &line_buf,
+        "Scene models: {d}  BSP submodels: {d}  World batches: {d}  Submodel batches: {d}",
+        .{
+            renderer.stats.model_instance_count,
+            renderer.stats.bsp_submodel_instance_count,
+            renderer.stats.world_batch_count,
+            renderer.stats.submodel_batch_count,
+        },
+    ) catch return;
+    imgui.text(scene_line);
+
+    const toggle_line = std.fmt.bufPrintZ(
+        &line_buf,
+        "UI: inspector={s}  wire={s} fullbright={s} cull={s}",
+        .{
+            if (inspector_visible) "on" else "off",
+            if (renderer.draw_wireframe) "on" else "off",
+            if (renderer.fullbright) "on" else "off",
+            if (renderer.backface_culling) "on" else "off",
+        },
+    ) catch return;
+    imgui.text(toggle_line);
+
+    if (renderer.selectedSceneObject()) |object| {
+        const selected_line = std.fmt.bufPrintZ(
+            &line_buf,
+            "Selected: {d}/{d} {s}  class={s}  batches={d}",
+            .{
+                renderer.selected_scene_object_index.? + 1,
+                renderer.scene_objects.len,
+                object.model_path orelse object.classname,
+                object.classname,
+                renderer.selectedSceneObjectBatchCount(),
+            },
+        ) catch return;
+        imgui.text(selected_line);
+    } else {
+        imgui.text("Selected: none");
+    }
+}
+
+fn drawQuickPerformanceSummary(profiler: *const FrameProfiler) void {
+    var line_buf: [192]u8 = undefined;
+    const summary = std.fmt.bufPrintZ(
+        &line_buf,
+        "Frame {d:.2} ms  draw {d:.2} ms  ui {d:.2} ms  wait {d:.2} ms",
+        .{
+            profiler.total_frame.current_ms,
+            profiler.world_draw.current_ms,
+            profiler.ui.current_ms,
+            profiler.present_wait.current_ms,
+        },
+    ) catch return;
+    imgui.text(summary);
+}
+
+fn drawMetricLine(label: []const u8, metric: FrameMetric, total_ms: f32) void {
+    var line_buf: [192]u8 = undefined;
+    const percent = if (total_ms > 0.0) (metric.current_ms / total_ms) * 100.0 else 0.0;
+    const line = std.fmt.bufPrintZ(
+        &line_buf,
+        "{s}: {d:>6.2} ms  avg {d:>6.2} ms  {d:>5.1}%",
+        .{ label, metric.current_ms, metric.smoothed_ms, percent },
+    ) catch return;
+    imgui.text(line);
 }
 
 fn drawInspectorDetails(renderer: *const q3.renderer.SceneRenderer) void {
@@ -722,4 +849,9 @@ fn collisionBoxSize() rl.Vector3 {
         .y = collision_box_maxs.y - collision_box_mins.y,
         .z = collision_box_maxs.z - collision_box_mins.z,
     };
+}
+
+fn nsBetween(start_ns: i128, end_ns: i128) u64 {
+    if (end_ns <= start_ns) return 0;
+    return @intCast(end_ns - start_ns);
 }
