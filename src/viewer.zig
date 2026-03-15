@@ -76,6 +76,9 @@ pub fn run(allocator: std.mem.Allocator) !void {
         if (rl.isKeyPressed(.f9)) {
             inspector.stats_visible = !inspector.stats_visible;
         }
+        if (rl.isKeyPressed(.f10)) {
+            inspector.visibility.draw_debug = !inspector.visibility.draw_debug;
+        }
 
         const input_start_ns = std.time.nanoTimestamp();
         controller.update(&camera, inspector.capture_mouse, inspector.capture_keyboard);
@@ -91,6 +94,7 @@ pub fn run(allocator: std.mem.Allocator) !void {
         const world_draw_start_ns = std.time.nanoTimestamp();
         rl.beginMode3D(camera);
         renderer.draw(camera);
+        drawVisibilityDebug(&map, &renderer, &inspector.visibility);
         drawCollisionDebug(&inspector.collision);
         rl.endMode3D();
         const world_draw_end_ns = std.time.nanoTimestamp();
@@ -98,7 +102,7 @@ pub fn run(allocator: std.mem.Allocator) !void {
         const ui_start_ns = std.time.nanoTimestamp();
         imgui.begin();
         if (inspector.visible) {
-            drawInspector(&collision_world, &renderer, &camera, &controller, &inspector, &profiler);
+            drawInspector(&map, &collision_world, &renderer, &camera, &controller, &inspector, &profiler);
         }
         if (inspector.stats_visible) {
             drawRuntimeStatsWindow(
@@ -399,7 +403,7 @@ fn drawOverlay(
     rl.drawRectangle(12, 12, 720, 54, rl.fade(.black, 0.52));
     rl.drawRectangleLines(12, 12, 720, 54, .dark_gray);
     rl.drawText(status_line, 24, 24, 18, .light_gray);
-    rl.drawText("RMB look  WASD fly  E/Q up-down  Tab objects  F1-F7 render toggles  F8 inspector  F9 stats", 24, 44, 16, .gray);
+    rl.drawText("RMB look  WASD fly  E/Q up-down  Tab objects  F1-F7 render toggles  F8 inspector  F9 stats  F10 vis", 24, 44, 16, .gray);
 }
 
 const InspectorState = struct {
@@ -407,10 +411,18 @@ const InspectorState = struct {
     stats_visible: bool = true,
     capture_mouse: bool = false,
     capture_keyboard: bool = false,
+    visibility: VisibilityDebugState = .{},
     collision: CollisionDebugState = .{},
 };
 
+const VisibilityDebugState = struct {
+    draw_debug: bool = false,
+    draw_pvs_leaves: bool = true,
+    max_visible_leaf_boxes: usize = 64,
+};
+
 fn drawInspector(
+    map: *const q3.bsp.Map,
     collision_world: *const q3.collision.World,
     renderer: *q3.renderer.SceneRenderer,
     camera: *rl.Camera,
@@ -470,7 +482,52 @@ fn drawInspector(
     drawQuickPerformanceSummary(profiler);
 
     imgui.separator();
+    drawVisibilityInspector(map, renderer, &inspector.visibility);
+
+    imgui.separator();
     drawCollisionInspector(collision_world, renderer, camera, controller, &inspector.collision);
+}
+
+fn drawVisibilityInspector(
+    map: *const q3.bsp.Map,
+    renderer: *const q3.renderer.SceneRenderer,
+    state: *VisibilityDebugState,
+) void {
+    var line_buf: [256]u8 = undefined;
+    imgui.text("Visibility");
+    _ = imgui.checkbox("Draw leaf/PVS debug", &state.draw_debug);
+    _ = imgui.checkbox("Draw PVS-visible leaves", &state.draw_pvs_leaves);
+
+    if (imgui.button("Fewer leaf boxes")) {
+        if (state.max_visible_leaf_boxes > 8) state.max_visible_leaf_boxes -= 8;
+    }
+    imgui.sameLine();
+    if (imgui.button("More leaf boxes")) {
+        state.max_visible_leaf_boxes += 8;
+    }
+
+    const summary = std.fmt.bufPrintZ(
+        &line_buf,
+        "Camera leaf: {?d}  cluster: {d}  max boxes: {d}",
+        .{
+            renderer.last_camera_leaf_index,
+            renderer.last_camera_cluster,
+            state.max_visible_leaf_boxes,
+        },
+    ) catch return;
+    imgui.text(summary);
+
+    if (renderer.last_camera_cluster >= 0) {
+        const visible_leaf_count = countVisibleLeaves(map, renderer.last_camera_cluster);
+        const visible_line = std.fmt.bufPrintZ(
+            &line_buf,
+            "Visible leaves in cluster set: {d}/{d}",
+            .{ visible_leaf_count, map.leaves.len },
+        ) catch return;
+        imgui.text(visible_line);
+    } else {
+        imgui.text("Visible leaves: unavailable outside BSP leaves.");
+    }
 }
 
 const FrameSample = struct {
@@ -1223,6 +1280,35 @@ fn drawCollisionInspector(
     }
 }
 
+fn drawVisibilityDebug(
+    map: *const q3.bsp.Map,
+    renderer: *const q3.renderer.SceneRenderer,
+    state: *const VisibilityDebugState,
+) void {
+    if (!state.draw_debug) return;
+
+    const current_leaf_index = renderer.last_camera_leaf_index;
+    if (current_leaf_index) |leaf_index| {
+        if (leaf_index < map.leaves.len) {
+            rl.drawBoundingBox(leafBoundingBox(map.leaves[leaf_index]), .yellow);
+        }
+    }
+
+    if (!state.draw_pvs_leaves) return;
+    if (renderer.last_camera_cluster < 0) return;
+
+    var drawn_count: usize = 0;
+    for (map.leaves, 0..) |leaf, leaf_index| {
+        if (current_leaf_index != null and leaf_index == current_leaf_index.?) continue;
+        if (leaf.cluster < 0) continue;
+        if (!map.isClusterVisible(renderer.last_camera_cluster, leaf.cluster)) continue;
+
+        rl.drawBoundingBox(leafBoundingBox(leaf), .sky_blue);
+        drawn_count += 1;
+        if (drawn_count >= state.max_visible_leaf_boxes) break;
+    }
+}
+
 fn focusCameraOnCollisionHit(
     camera: *rl.Camera,
     controller: *CameraController,
@@ -1303,6 +1389,43 @@ fn collisionBoxSize() rl.Vector3 {
         .x = collision_box_maxs.x - collision_box_mins.x,
         .y = collision_box_maxs.y - collision_box_mins.y,
         .z = collision_box_maxs.z - collision_box_mins.z,
+    };
+}
+
+fn countVisibleLeaves(map: *const q3.bsp.Map, camera_cluster: i32) usize {
+    if (camera_cluster < 0) return 0;
+    var count: usize = 0;
+    for (map.leaves) |leaf| {
+        if (leaf.cluster < 0) continue;
+        if (map.isClusterVisible(camera_cluster, leaf.cluster)) count += 1;
+    }
+    return count;
+}
+
+fn leafBoundingBox(leaf: q3.bsp.Leaf) rl.BoundingBox {
+    const map_min = [3]f32{
+        @floatFromInt(leaf.mins[0]),
+        @floatFromInt(leaf.mins[1]),
+        @floatFromInt(leaf.mins[2]),
+    };
+    const map_max = [3]f32{
+        @floatFromInt(leaf.maxs[0]),
+        @floatFromInt(leaf.maxs[1]),
+        @floatFromInt(leaf.maxs[2]),
+    };
+    const engine_min = q3.bsp.toEngineSpace(map_min);
+    const engine_max = q3.bsp.toEngineSpace(map_max);
+    return .{
+        .min = .{
+            .x = @min(engine_min.x, engine_max.x),
+            .y = @min(engine_min.y, engine_max.y),
+            .z = @min(engine_min.z, engine_max.z),
+        },
+        .max = .{
+            .x = @max(engine_min.x, engine_max.x),
+            .y = @max(engine_min.y, engine_max.y),
+            .z = @max(engine_min.z, engine_max.z),
+        },
     };
 }
 
