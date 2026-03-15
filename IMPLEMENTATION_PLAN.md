@@ -62,23 +62,23 @@ This file is a working checklist for turning this repo into a PK3/BSP-native run
 
 ## Phase 6: Shader / Material Runtime
 
-- [ ] Split shader script parsing out of the current texture cache logic.
-- [ ] Represent shader stages as plain data.
+- [x] Split shader script parsing out of the current texture cache logic.
+- [x] Represent shader stages as plain data.
 - [ ] Support a first real subset:
-- [ ] `map`
-- [ ] `clampmap`
-- [ ] `animMap`
-- [ ] `blendFunc`
-- [ ] `alphaFunc`
+- [x] `map`
+- [x] `clampmap`
+- [x] `animMap`
+- [x] `blendFunc`
+- [x] `alphaFunc`
 - [ ] `rgbGen`
 - [ ] `alphaGen`
 - [ ] `tcMod`
-- [ ] `cull`
-- [ ] `surfaceparm`
+- [x] `cull`
+- [x] `surfaceparm`
 - [ ] sky
 - [ ] fog
 - [ ] autosprite or equivalent billboard handling
-- [ ] Wire time-based stage evaluation into rendering so animated materials work.
+- [x] Wire time-based stage evaluation into rendering so animated materials work.
 
 ## Phase 7: Model Support
 
@@ -120,4 +120,4 @@ This file is a working checklist for turning this repo into a PK3/BSP-native run
 
 ## Current Focus
 
-- [ ] Move from the first collision debug pass into broader collision coverage or the shader/material runtime.
+- [ ] Extend the shader/material runtime beyond the first animated-stage subset.

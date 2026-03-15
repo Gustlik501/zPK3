@@ -5,6 +5,7 @@ const archive = @import("archive.zig");
 const bsp = @import("bsp.zig");
 const qmath = @import("math.zig");
 const qscene = @import("scene.zig");
+const qshader = @import("shader.zig");
 const tga = @import("tga.zig");
 
 const lightmap_shader_vs: [:0]const u8 =
@@ -62,6 +63,7 @@ const MaterialRule = qscene.MaterialRule;
 const SurfaceBatch = struct {
     model: rl.Model,
     wire_positions: []f32,
+    material_name: []const u8,
     owner_bsp_model_index: usize,
     render_mode: RenderMode,
     use_lightmap: bool,
@@ -127,6 +129,7 @@ pub const SceneRenderer = struct {
             for (batch_list.items) |batch| {
                 rl.unloadModel(batch.model);
                 allocator.free(batch.wire_positions);
+                allocator.free(batch.material_name);
             }
             batch_list.deinit(allocator);
         }
@@ -142,7 +145,9 @@ pub const SceneRenderer = struct {
             var model = try rl.loadModelFromMesh(mesh);
             const wire_positions = try allocator.dupe(f32, batch.positions);
             errdefer allocator.free(wire_positions);
-            const texture = try texture_cache.loadTexture(batch.texture_name);
+            const material_name = try allocator.dupe(u8, batch.texture_name);
+            errdefer allocator.free(material_name);
+            const texture = try texture_cache.getTextureForMaterial(batch.texture_name, 0.0);
             const lightmap = lightmap_cache.getTexture(batch.lightmap_index);
             if (texture_cache.was_missing_last_load) {
                 stats.missing_texture_count += 1;
@@ -154,6 +159,7 @@ pub const SceneRenderer = struct {
             try batch_list.append(allocator, .{
                 .model = model,
                 .wire_positions = wire_positions,
+                .material_name = material_name,
                 .owner_bsp_model_index = batch.owner_bsp_model_index,
                 .render_mode = batch.render_mode,
                 .use_lightmap = batch.use_lightmap,
@@ -180,6 +186,7 @@ pub const SceneRenderer = struct {
         for (self.batches) |batch| {
             rl.unloadModel(batch.model);
             self.allocator.free(batch.wire_positions);
+            self.allocator.free(batch.material_name);
         }
         self.allocator.free(self.batches);
         for (self.scene_objects) |*object| object.deinit(self.allocator);
@@ -279,7 +286,8 @@ pub const SceneRenderer = struct {
             .alpha, .additive => rl.endBlendMode(),
         };
 
-        for (self.batches) |batch| {
+        const time_seconds = rl.getTime();
+        for (self.batches) |*batch| {
             if (batch.render_mode != mode) continue;
             if (batch.owner_bsp_model_index == 0 and !self.draw_world_geometry) continue;
             if (batch.owner_bsp_model_index != 0 and !self.draw_submodel_geometry) continue;
@@ -294,6 +302,9 @@ pub const SceneRenderer = struct {
             rl.setShaderValue(self.lightmap_shader, self.lightmap_use_loc, &use_lightmap, .int);
             rl.setShaderValue(self.lightmap_shader, self.lightmap_scale_loc, &lightmap_scale, .float);
             rl.setShaderValue(self.lightmap_shader, self.alpha_cutoff_loc, &batch.alpha_cutoff, .float);
+
+            const texture = self.texture_cache.getTextureForMaterial(batch.material_name, time_seconds) catch self.texture_cache.placeholder;
+            batch.model.materials[0].maps[@intFromEnum(rl.MATERIAL_MAP_DIFFUSE)].texture = texture;
 
             if (!self.backface_culling or batch.double_sided) {
                 rlgl.rlDisableBackfaceCulling();
@@ -358,6 +369,7 @@ pub const SceneRenderer = struct {
 const TextureCache = struct {
     allocator: std.mem.Allocator,
     packs: *archive.Pk3Collection,
+    shaders: qshader.Library,
     textures: std.StringHashMap(rl.Texture2D),
     shader_aliases: std.StringHashMap([]const u8),
     material_rules: std.StringHashMap(MaterialRule),
@@ -371,9 +383,13 @@ const TextureCache = struct {
         const image = rl.genImageChecked(64, 64, 8, 8, .magenta, .black);
         defer rl.unloadImage(image);
 
+        var shaders = try qshader.Library.init(allocator, packs);
+        errdefer shaders.deinit();
+
         var cache = TextureCache{
             .allocator = allocator,
             .packs = packs,
+            .shaders = shaders,
             .textures = std.StringHashMap(rl.Texture2D).init(allocator),
             .shader_aliases = std.StringHashMap([]const u8).init(allocator),
             .material_rules = std.StringHashMap(MaterialRule).init(allocator),
@@ -384,7 +400,6 @@ const TextureCache = struct {
         };
         errdefer cache.deinit();
 
-        try cache.loadShaderAliases();
         try cache.buildFallbackIndex();
         return cache;
     }
@@ -398,6 +413,7 @@ const TextureCache = struct {
             self.allocator.free(entry.key_ptr.*);
         }
         self.textures.deinit();
+        self.shaders.deinit();
 
         var alias_it = self.shader_aliases.iterator();
         while (alias_it.next()) |entry| {
@@ -432,45 +448,80 @@ const TextureCache = struct {
         rl.unloadTexture(self.placeholder);
     }
 
-    pub fn loadTexture(self: *TextureCache, texture_name: []const u8) !rl.Texture2D {
+    pub fn getTextureForMaterial(self: *TextureCache, material_name: []const u8, time_seconds: f64) !rl.Texture2D {
         self.was_missing_last_load = false;
 
-        if (self.textures.get(texture_name)) |texture| {
-            return texture;
-        }
-
-        if (try self.tryLoadTexture(texture_name, texture_name, 0)) |texture| {
-            return texture;
+        const target_name = self.resolveMaterialTexture(material_name, time_seconds);
+        if (target_name) |resolved_name| {
+            if (try self.tryLoadResolvedTexture(resolved_name)) |texture| {
+                return texture;
+            }
         }
 
         self.was_missing_last_load = true;
-        const owned_name = try self.allocator.dupe(u8, texture_name);
-        try self.textures.put(owned_name, self.placeholder);
         return self.placeholder;
     }
 
     pub fn getMaterialRule(self: *const TextureCache, texture_name: []const u8) MaterialRule {
-        var rule = self.material_rules.get(texture_name) orelse MaterialRule{};
+        var rule = MaterialRule{};
+        if (self.shaders.get(texture_name)) |definition| {
+            if (definition.surfaceparm_nolightmap) {
+                rule.use_lightmap = false;
+            }
+            if (definition.surfaceparm_fog or definition.surfaceparm_sky or definition.surfaceparm_nodraw) {
+                rule.skip = true;
+            }
+            if (definition.surfaceparm_trans and rule.render_mode == .solid) {
+                rule.render_mode = .alpha;
+            }
+            if (definition.cull_mode == .none) {
+                rule.double_sided = true;
+            }
+
+            for (definition.stages) |stage| {
+                if (stage.map_kind == .lightmap) continue;
+                if (stage.alpha_cutout) {
+                    rule.alpha_cutoff = @max(rule.alpha_cutoff, 0.5);
+                }
+
+                switch (stage.blend_mode) {
+                    .solid, .filter => {},
+                    .alpha => {
+                        if (rule.render_mode != .additive) rule.render_mode = .alpha;
+                    },
+                    .additive => {
+                        rule.render_mode = .additive;
+                        rule.use_lightmap = false;
+                    },
+                }
+            }
+        }
         if (std.mem.startsWith(u8, texture_name, "models/")) {
             rule.double_sided = true;
         }
         return rule;
     }
 
-    fn tryLoadTexture(self: *TextureCache, cache_key: []const u8, target_name: []const u8, depth: usize) !?rl.Texture2D {
-        if (depth > 4) return null;
+    fn resolveMaterialTexture(self: *const TextureCache, material_name: []const u8, time_seconds: f64) ?[]const u8 {
+        if (self.shaders.get(material_name)) |definition| {
+            return definition.resolveImage(time_seconds);
+        }
+        return material_name;
+    }
 
-        if (try self.loadTextureFile(cache_key, target_name)) |texture| {
+    fn tryLoadResolvedTexture(self: *TextureCache, target_name: []const u8) !?rl.Texture2D {
+        if (self.textures.get(target_name)) |texture| {
             return texture;
         }
 
-        if (self.shader_aliases.get(target_name)) |alias| {
-            return try self.tryLoadTexture(cache_key, alias, depth + 1);
+        if (try self.loadTextureFile(target_name, target_name)) |texture| {
+            return texture;
         }
 
         if (self.findFallbackPath(target_name)) |fallback_path| {
             if (std.mem.eql(u8, fallback_path, target_name)) return null;
-            return try self.tryLoadTexture(cache_key, fallback_path, depth + 1);
+            if (self.textures.get(fallback_path)) |texture| return texture;
+            return try self.loadTextureFile(fallback_path, fallback_path);
         }
 
         return null;
