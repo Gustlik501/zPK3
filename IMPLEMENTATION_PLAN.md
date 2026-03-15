@@ -107,7 +107,7 @@ This file is a working checklist for turning this repo into a PK3/BSP-native run
 
 - [ ] Add debug overlays for entities, collision brushes, submodels, and missing assets.
 - [x] Add a first scene-object/submodel inspection flow in the viewer.
-- [ ] Integrate `rlImGui` as the tooling UI layer for inspector/editor work.
+- [x] Integrate `rlImGui` as the tooling UI layer for inspector/editor work.
 - [ ] Use that as the base for later editor work instead of jumping to full editing immediately.
 
 ## Immediate Execution Order
@@ -120,4 +120,4 @@ This file is a working checklist for turning this repo into a PK3/BSP-native run
 
 ## Current Focus
 
-- [ ] Add collision debug views/tests and start `rlImGui` inspector integration for scene objects/submodels.
+- [ ] Add collision debug views/tests and extend the `rlImGui` inspector beyond scene objects/submodels.

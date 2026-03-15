@@ -30,7 +30,27 @@ fn addViewerExecutable(
         .root_module = root_module,
     });
     exe.root_module.addImport("raylib", raylib);
+    exe.root_module.addIncludePath(b.path("src/ui"));
+    exe.root_module.addIncludePath(b.path("vendor/rlImGui"));
+    exe.root_module.addIncludePath(b.path("vendor/rlImGui/imgui"));
+    exe.root_module.addCSourceFiles(.{
+        .root = b.path("."),
+        .files = &.{
+            "vendor/rlImGui/rlImGui.cpp",
+            "vendor/rlImGui/imgui/imgui.cpp",
+            "vendor/rlImGui/imgui/imgui_draw.cpp",
+            "vendor/rlImGui/imgui/imgui_tables.cpp",
+            "vendor/rlImGui/imgui/imgui_widgets.cpp",
+            "src/ui/zpk3_imgui_bridge.cpp",
+        },
+        .flags = &.{
+            "-std=c++17",
+            "-DIMGUI_DISABLE_OBSOLETE_FUNCTIONS",
+            "-DIMGUI_DISABLE_OBSOLETE_KEYIO",
+        },
+    });
     exe.root_module.linkLibrary(raylib_artifact);
+    exe.linkLibCpp();
     return exe;
 }
 

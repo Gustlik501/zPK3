@@ -1,6 +1,7 @@
 const std = @import("std");
 const rl = @import("raylib");
 const q3 = @import("quake3/mod.zig");
+const imgui = @import("ui/imgui.zig");
 
 pub fn run(allocator: std.mem.Allocator) !void {
     const args = try std.process.argsAlloc(allocator);
@@ -31,15 +32,23 @@ pub fn run(allocator: std.mem.Allocator) !void {
     rl.initWindow(1600, 900, "quake3 pk3 viewer");
     defer rl.closeWindow();
 
+    imgui.setup(true);
+    defer imgui.shutdown();
+
     var renderer = try q3.renderer.SceneRenderer.init(allocator, &packs, &map);
     defer renderer.deinit();
 
     var camera = defaultCamera(toRlVector3(map.bounds_center));
     var controller = CameraController.init(camera);
+    var inspector: InspectorState = .{};
     rl.setTargetFPS(144);
 
     while (!rl.windowShouldClose()) {
-        controller.update(&camera);
+        if (rl.isKeyPressed(.f8)) {
+            inspector.visible = !inspector.visible;
+        }
+
+        controller.update(&camera, inspector.capture_mouse, inspector.capture_keyboard);
 
         rl.beginDrawing();
         defer rl.endDrawing();
@@ -49,7 +58,17 @@ pub fn run(allocator: std.mem.Allocator) !void {
         renderer.draw();
         rl.endMode3D();
 
-        drawOverlay(map, &renderer, source_path, entity_list.items.len, validation.issueCount());
+        imgui.begin();
+        defer imgui.end();
+
+        if (inspector.visible) {
+            drawInspector(&renderer, &camera, &controller, &inspector);
+        }
+
+        inspector.capture_mouse = imgui.wantCaptureMouse();
+        inspector.capture_keyboard = imgui.wantCaptureKeyboard();
+
+        drawOverlay(map, &renderer, source_path, entity_list.items.len, validation.issueCount(), inspector.visible);
     }
 }
 
@@ -81,6 +100,10 @@ const CameraController = struct {
     cursor_locked: bool = false,
 
     fn init(camera: rl.Camera) CameraController {
+        return fromCamera(camera);
+    }
+
+    fn fromCamera(camera: rl.Camera) CameraController {
         const forward = normalize(subtract(camera.target, camera.position));
         return .{
             .yaw = std.math.atan2(forward.z, forward.x),
@@ -88,17 +111,26 @@ const CameraController = struct {
         };
     }
 
-    fn update(self: *CameraController, camera: *rl.Camera) void {
-        const wants_look = rl.isMouseButtonDown(.right);
-        if (wants_look and !self.cursor_locked) {
-            rl.disableCursor();
-            self.cursor_locked = true;
-        } else if (!wants_look and self.cursor_locked) {
+    fn syncFromCamera(self: *CameraController, camera: rl.Camera) void {
+        self.* = fromCamera(camera);
+    }
+
+    fn update(self: *CameraController, camera: *rl.Camera, capture_mouse: bool, capture_keyboard: bool) void {
+        if (capture_mouse and self.cursor_locked) {
             rl.enableCursor();
             self.cursor_locked = false;
         }
 
-        if (self.cursor_locked) {
+        const wants_look = rl.isMouseButtonDown(.right);
+        if (!capture_mouse and wants_look and !self.cursor_locked) {
+            rl.disableCursor();
+            self.cursor_locked = true;
+        } else if ((capture_mouse or !wants_look) and self.cursor_locked) {
+            rl.enableCursor();
+            self.cursor_locked = false;
+        }
+
+        if (self.cursor_locked and !capture_mouse) {
             const mouse_delta = rl.getMouseDelta();
             self.yaw += mouse_delta.x * self.mouse_sensitivity;
             self.pitch -= mouse_delta.y * self.mouse_sensitivity;
@@ -107,8 +139,8 @@ const CameraController = struct {
 
         const dt = rl.getFrameTime();
         var speed = self.move_speed;
-        if (rl.isKeyDown(.left_shift) or rl.isKeyDown(.right_shift)) speed *= self.boost_multiplier;
-        if (rl.isKeyDown(.left_control) or rl.isKeyDown(.right_control)) speed *= self.slow_multiplier;
+        if (!capture_keyboard and (rl.isKeyDown(.left_shift) or rl.isKeyDown(.right_shift))) speed *= self.boost_multiplier;
+        if (!capture_keyboard and (rl.isKeyDown(.left_control) or rl.isKeyDown(.right_control))) speed *= self.slow_multiplier;
         speed *= dt;
 
         const forward = self.forwardVector();
@@ -116,18 +148,20 @@ const CameraController = struct {
         const right = normalize(cross(forward, world_up));
 
         var movement = rl.Vector3{ .x = 0.0, .y = 0.0, .z = 0.0 };
-        if (rl.isKeyDown(.w)) movement = add(movement, scale(forward, speed));
-        if (rl.isKeyDown(.s)) movement = add(movement, scale(forward, -speed));
-        if (rl.isKeyDown(.d)) movement = add(movement, scale(right, speed));
-        if (rl.isKeyDown(.a)) movement = add(movement, scale(right, -speed));
-        if (rl.isKeyDown(.e)) movement.y += speed;
-        if (rl.isKeyDown(.q)) movement.y -= speed;
+        if (!capture_keyboard) {
+            if (rl.isKeyDown(.w)) movement = add(movement, scale(forward, speed));
+            if (rl.isKeyDown(.s)) movement = add(movement, scale(forward, -speed));
+            if (rl.isKeyDown(.d)) movement = add(movement, scale(right, speed));
+            if (rl.isKeyDown(.a)) movement = add(movement, scale(right, -speed));
+            if (rl.isKeyDown(.e)) movement.y += speed;
+            if (rl.isKeyDown(.q)) movement.y -= speed;
+        }
 
         camera.position = add(camera.position, movement);
         camera.target = add(camera.position, forward);
 
         const wheel = rl.getMouseWheelMove();
-        if (wheel != 0.0) {
+        if (!capture_mouse and wheel != 0.0) {
             camera.fovy = @max(25.0, @min(100.0, camera.fovy - wheel * 3.0));
         }
     }
@@ -180,11 +214,12 @@ fn drawOverlay(
     source_path: []const u8,
     entity_count: usize,
     validation_issue_count: usize,
+    inspector_visible: bool,
 ) void {
     const stats = renderer.stats;
 
-    rl.drawRectangle(12, 12, 660, 252, rl.fade(.black, 0.72));
-    rl.drawRectangleLines(12, 12, 660, 252, .dark_gray);
+    rl.drawRectangle(12, 12, 660, 274, rl.fade(.black, 0.72));
+    rl.drawRectangleLines(12, 12, 660, 274, .dark_gray);
     rl.drawText("Modular Quake 3 PK3 viewer", 24, 24, 24, .ray_white);
 
     var line_buf: [384]u8 = undefined;
@@ -275,6 +310,133 @@ fn drawOverlay(
         ) catch return;
     rl.drawText(object_detail_line, 24, 188, 18, .light_gray);
 
-    rl.drawText("Controls: RMB look, WASD fly, E/Q up-down, Shift boost, wheel FOV, Tab cycle objects", 24, 210, 18, .gray);
-    rl.drawText("F1 wire, F2 fullbright, F3 cull, F4 objects, F5 world, F6 submodels, F7 isolate", 24, 232, 18, .gray);
+    const ui_line = std.fmt.bufPrintZ(&line_buf, "UI: inspector={s}", .{if (inspector_visible) "on" else "off"}) catch return;
+    rl.drawText(ui_line, 24, 210, 18, .gray);
+    rl.drawText("Controls: RMB look, WASD fly, E/Q up-down, Shift boost, wheel FOV, Tab cycle objects", 24, 232, 18, .gray);
+    rl.drawText("F1 wire, F2 fullbright, F3 cull, F4 objects, F5 world, F6 submodels, F7 isolate, F8 inspector", 24, 254, 18, .gray);
+}
+
+const InspectorState = struct {
+    visible: bool = true,
+    capture_mouse: bool = false,
+    capture_keyboard: bool = false,
+};
+
+fn drawInspector(
+    renderer: *q3.renderer.SceneRenderer,
+    camera: *rl.Camera,
+    controller: *CameraController,
+    inspector: *InspectorState,
+) void {
+    imgui.setNextWindowSize(430.0, 620.0);
+    const open = imgui.beginWindow("Scene Inspector", &inspector.visible);
+    defer imgui.endWindow();
+    if (!open) return;
+
+    _ = imgui.checkbox("Draw scene object markers", &renderer.draw_scene_objects);
+    _ = imgui.checkbox("Draw world geometry", &renderer.draw_world_geometry);
+    _ = imgui.checkbox("Draw submodel geometry", &renderer.draw_submodel_geometry);
+    _ = imgui.checkbox("Isolate selected BSP submodel", &renderer.isolate_selected_submodel);
+
+    if (imgui.button("Previous")) renderer.selectPreviousSceneObject();
+    imgui.sameLine();
+    if (imgui.button("Next")) renderer.selectNextSceneObject();
+    imgui.sameLine();
+    if (imgui.button("Clear selection")) renderer.setSelectedSceneObject(null);
+
+    if (imgui.button("Focus selection")) {
+        focusCameraOnSelection(renderer, camera, controller);
+    }
+
+    imgui.separator();
+    imgui.beginChild("scene_objects", 0.0, 280.0, true);
+    var label_buf: [256]u8 = undefined;
+    for (renderer.scene_objects, 0..) |object, index| {
+        const kind_name = switch (object.kind) {
+            .bsp_submodel => "bsp",
+            .external_model => "model",
+        };
+        const label = std.fmt.bufPrintZ(
+            &label_buf,
+            "#{d} [{s}] {s} {s}",
+            .{ index + 1, kind_name, object.classname, object.targetname orelse "" },
+        ) catch continue;
+        if (imgui.selectable(label, renderer.selected_scene_object_index == index)) {
+            renderer.setSelectedSceneObject(index);
+        }
+    }
+    imgui.endChild();
+
+    imgui.separator();
+    drawInspectorDetails(renderer);
+}
+
+fn drawInspectorDetails(renderer: *const q3.renderer.SceneRenderer) void {
+    var line_buf: [320]u8 = undefined;
+
+    if (renderer.selectedSceneObject()) |object| {
+        const summary = std.fmt.bufPrintZ(
+            &line_buf,
+            "Selected entity {d}  batches {d}",
+            .{ object.entity_index, renderer.selectedSceneObjectBatchCount() },
+        ) catch return;
+        imgui.text(summary);
+
+        const class_line = std.fmt.bufPrintZ(&line_buf, "classname: {s}", .{object.classname}) catch return;
+        imgui.text(class_line);
+
+        const target_line = std.fmt.bufPrintZ(&line_buf, "targetname: {s}", .{object.targetname orelse "-"}) catch return;
+        imgui.text(target_line);
+
+        const model_line = std.fmt.bufPrintZ(&line_buf, "model: {s}", .{object.model_path orelse "-"}) catch return;
+        imgui.text(model_line);
+
+        if (object.bsp_model_index) |model_index| {
+            const bsp_line = std.fmt.bufPrintZ(&line_buf, "bsp model index: {d}", .{model_index}) catch return;
+            imgui.text(bsp_line);
+        }
+
+        const origin_line = std.fmt.bufPrintZ(
+            &line_buf,
+            "origin: ({d:.1}, {d:.1}, {d:.1})",
+            .{ object.origin.x, object.origin.y, object.origin.z },
+        ) catch return;
+        imgui.text(origin_line);
+
+        if (object.bounds) |bounds| {
+            const bounds_min = std.fmt.bufPrintZ(
+                &line_buf,
+                "bounds min: ({d:.1}, {d:.1}, {d:.1})",
+                .{ bounds.min.x, bounds.min.y, bounds.min.z },
+            ) catch return;
+            imgui.text(bounds_min);
+
+            const bounds_max = std.fmt.bufPrintZ(
+                &line_buf,
+                "bounds max: ({d:.1}, {d:.1}, {d:.1})",
+                .{ bounds.max.x, bounds.max.y, bounds.max.z },
+            ) catch return;
+            imgui.text(bounds_max);
+        }
+        return;
+    }
+
+    const empty_line = std.fmt.bufPrintZ(&line_buf, "No scene object selected. Total objects: {d}", .{renderer.scene_objects.len}) catch return;
+    imgui.text(empty_line);
+}
+
+fn focusCameraOnSelection(
+    renderer: *const q3.renderer.SceneRenderer,
+    camera: *rl.Camera,
+    controller: *CameraController,
+) void {
+    const focus = renderer.selectedSceneObjectFocusPoint() orelse return;
+    const target = toRlVector3(focus);
+    camera.target = target;
+    camera.position = .{
+        .x = target.x + 160.0,
+        .y = target.y + 120.0,
+        .z = target.z + 160.0,
+    };
+    controller.syncFromCamera(camera.*);
 }

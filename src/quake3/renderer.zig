@@ -213,7 +213,7 @@ pub const SceneRenderer = struct {
             self.isolate_selected_submodel = !self.isolate_selected_submodel;
         }
         if (rl.isKeyPressed(.tab)) {
-            self.selectNextSceneObject(if (isShiftDown()) -1 else 1);
+            self.stepSelectedSceneObject(if (isShiftDown()) -1 else 1);
         }
 
         self.drawBatches(.solid);
@@ -229,6 +229,21 @@ pub const SceneRenderer = struct {
         return &self.scene_objects[index];
     }
 
+    pub fn setSelectedSceneObject(self: *SceneRenderer, index: ?usize) void {
+        if (index) |value| {
+            if (value >= self.scene_objects.len) return;
+        }
+        self.selected_scene_object_index = index;
+    }
+
+    pub fn selectNextSceneObject(self: *SceneRenderer) void {
+        self.stepSelectedSceneObject(1);
+    }
+
+    pub fn selectPreviousSceneObject(self: *SceneRenderer) void {
+        self.stepSelectedSceneObject(-1);
+    }
+
     pub fn selectedSceneObjectBatchCount(self: *const SceneRenderer) usize {
         const object = self.selectedSceneObject() orelse return 0;
         if (object.bsp_model_index) |model_index| {
@@ -239,6 +254,18 @@ pub const SceneRenderer = struct {
             return count;
         }
         return 0;
+    }
+
+    pub fn selectedSceneObjectFocusPoint(self: *const SceneRenderer) ?qmath.Vec3 {
+        const object = self.selectedSceneObject() orelse return null;
+        if (object.bounds) |bounds| {
+            return .{
+                .x = (bounds.min.x + bounds.max.x) * 0.5,
+                .y = (bounds.min.y + bounds.max.y) * 0.5,
+                .z = (bounds.min.z + bounds.max.z) * 0.5,
+            };
+        }
+        return object.origin;
     }
 
     fn drawBatches(self: *SceneRenderer, mode: RenderMode) void {
@@ -305,7 +332,7 @@ pub const SceneRenderer = struct {
         }
     }
 
-    fn selectNextSceneObject(self: *SceneRenderer, step: i32) void {
+    fn stepSelectedSceneObject(self: *SceneRenderer, step: i32) void {
         if (self.scene_objects.len == 0) {
             self.selected_scene_object_index = null;
             return;
