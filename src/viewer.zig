@@ -664,8 +664,12 @@ fn drawCollisionDebug(state: *const CollisionDebugState) void {
     const start = toRlVector3(trace.start);
     const intended_end = toRlVector3(trace.intended_end);
     const actual_end = toRlVector3(trace.result.end_position);
+    const to_target = subtract(intended_end, start);
+    const start_dir = normalize(to_target);
+    const start_hint = add(start, scale(start_dir, 18.0));
 
-    rl.drawSphereWires(start, 6.0, 8, 8, .sky_blue);
+    rl.drawSphere(start_hint, 1.8, .sky_blue);
+    rl.drawLine3D(start, start_hint, .sky_blue);
     rl.drawLine3D(start, intended_end, .dark_gray);
     rl.drawLine3D(start, actual_end, if (trace.result.hit) .orange else .green);
 
