@@ -467,6 +467,7 @@ const CollisionDebugState = struct {
     trace_mode: CollisionTraceMode = .selection,
     trace_length_index: usize = 2,
     camera_contents: i32 = 0,
+    camera_movement_contents: i32 = 0,
     last_trace: ?CollisionTraceSnapshot = null,
 };
 
@@ -484,12 +485,13 @@ fn updateCollisionDebugState(
 ) void {
     const start = fromRlVector3(camera.position);
     state.camera_contents = collision_world.pointContents(map, start);
+    state.camera_movement_contents = collision_world.pointContentsMasked(map, start, q3.collision.movement_mask);
 
     const intended_end = collisionTraceTarget(state, camera, controller, renderer);
     const result = if (state.use_box_trace)
-        collision_world.traceBox(map, start, intended_end, collision_box_mins, collision_box_maxs)
+        collision_world.traceBoxMasked(map, start, intended_end, collision_box_mins, collision_box_maxs, q3.collision.movement_mask)
     else
-        collision_world.traceSegment(map, start, intended_end);
+        collision_world.traceSegmentMasked(map, start, intended_end, q3.collision.movement_mask);
 
     state.last_trace = .{
         .start = start,
@@ -544,8 +546,13 @@ fn drawCollisionInspector(
 
     const summary = std.fmt.bufPrintZ(
         &line_buf,
-        "Brushes: {d}  Camera contents: 0x{x}  Trace len: {d:.0}",
-        .{ collision_world.brushes.len, @as(u32, @bitCast(state.camera_contents)), collision_trace_lengths[state.trace_length_index] },
+        "Brushes: {d}  Camera contents: 0x{x}  Move mask: 0x{x}  Trace len: {d:.0}",
+        .{
+            collision_world.brushes.len,
+            @as(u32, @bitCast(state.camera_contents)),
+            @as(u32, @bitCast(state.camera_movement_contents)),
+            collision_trace_lengths[state.trace_length_index],
+        },
     ) catch return;
     imgui.text(summary);
 
@@ -647,7 +654,15 @@ fn drawCollisionDebug(state: *const CollisionDebugState) void {
     rl.drawLine3D(start, actual_end, if (trace.result.hit) .orange else .green);
 
     if (state.use_box_trace) {
-        rl.drawCubeWiresV(actual_end, .{ .x = 32.0, .y = 56.0, .z = 32.0 }, if (trace.result.hit) .orange else .green);
+        const distance_sq =
+            (trace.result.end_position.x - trace.start.x) * (trace.result.end_position.x - trace.start.x) +
+            (trace.result.end_position.y - trace.start.y) * (trace.result.end_position.y - trace.start.y) +
+            (trace.result.end_position.z - trace.start.z) * (trace.result.end_position.z - trace.start.z);
+        if (trace.result.start_solid or distance_sq < 1.0) {
+            rl.drawSphereWires(actual_end, 12.0, 8, 8, .orange);
+        } else {
+            rl.drawCubeWiresV(actual_end, .{ .x = 32.0, .y = 56.0, .z = 32.0 }, if (trace.result.hit) .orange else .green);
+        }
     }
 
     if (trace.result.hit) {

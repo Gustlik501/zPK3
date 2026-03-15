@@ -2,6 +2,31 @@ const std = @import("std");
 const bsp = @import("bsp.zig");
 const qmath = @import("math.zig");
 
+pub const contents = struct {
+    pub const solid: i32 = 0x00000001;
+    pub const lava: i32 = 0x00000008;
+    pub const slime: i32 = 0x00000010;
+    pub const water: i32 = 0x00000020;
+    pub const fog: i32 = 0x00000040;
+    pub const area_portal: i32 = 0x00008000;
+    pub const player_clip: i32 = 0x00010000;
+    pub const monster_clip: i32 = 0x00020000;
+    pub const teleporter: i32 = 0x00040000;
+    pub const jump_pad: i32 = 0x00080000;
+    pub const cluster_portal: i32 = 0x00100000;
+    pub const do_not_enter: i32 = 0x00200000;
+    pub const bot_clip: i32 = 0x00400000;
+    pub const body: i32 = 0x02000000;
+    pub const corpse: i32 = 0x04000000;
+    pub const detail: i32 = 0x08000000;
+    pub const structural: i32 = 0x10000000;
+    pub const translucent: i32 = 0x20000000;
+    pub const trigger: i32 = 0x40000000;
+    pub const no_drop: i32 = @bitCast(@as(u32, 0x80000000));
+};
+
+pub const movement_mask: i32 = contents.solid | contents.player_clip | contents.body;
+
 pub const BrushSide = struct {
     plane_index: usize,
     texture_index: i32,
@@ -94,19 +119,26 @@ pub const World = struct {
 
     pub fn pointContents(self: *const World, map: *const bsp.Map, point: qmath.Vec3) i32 {
         const map_point = bsp.toMapSpace(point);
-        var contents: i32 = 0;
+        return self.pointContentsMapPoint(map, map_point, -1);
+    }
 
-        for (self.brushes) |brush| {
-            if (pointInsideBrush(map, brush, map_point)) {
-                contents |= brush.contents;
-            }
-        }
-
-        return contents;
+    pub fn pointContentsMasked(self: *const World, map: *const bsp.Map, point: qmath.Vec3, mask: i32) i32 {
+        const map_point = bsp.toMapSpace(point);
+        return self.pointContentsMapPoint(map, map_point, mask);
     }
 
     pub fn traceSegment(self: *const World, map: *const bsp.Map, start: qmath.Vec3, end: qmath.Vec3) TraceResult {
-        return self.traceBox(map, start, end, .{ .x = 0.0, .y = 0.0, .z = 0.0 }, .{ .x = 0.0, .y = 0.0, .z = 0.0 });
+        return self.traceSegmentMasked(map, start, end, movement_mask);
+    }
+
+    pub fn traceSegmentMasked(
+        self: *const World,
+        map: *const bsp.Map,
+        start: qmath.Vec3,
+        end: qmath.Vec3,
+        mask: i32,
+    ) TraceResult {
+        return self.traceBoxMasked(map, start, end, .{ .x = 0.0, .y = 0.0, .z = 0.0 }, .{ .x = 0.0, .y = 0.0, .z = 0.0 }, mask);
     }
 
     pub fn traceBox(
@@ -117,6 +149,18 @@ pub const World = struct {
         mins: qmath.Vec3,
         maxs: qmath.Vec3,
     ) TraceResult {
+        return self.traceBoxMasked(map, start, end, mins, maxs, movement_mask);
+    }
+
+    pub fn traceBoxMasked(
+        self: *const World,
+        map: *const bsp.Map,
+        start: qmath.Vec3,
+        end: qmath.Vec3,
+        mins: qmath.Vec3,
+        maxs: qmath.Vec3,
+        mask: i32,
+    ) TraceResult {
         const start_map = bsp.toMapSpace(start);
         const end_map = bsp.toMapSpace(end);
         const extents = toMapExtents(mins, maxs);
@@ -126,6 +170,7 @@ pub const World = struct {
         };
 
         for (self.brushes, 0..) |brush, brush_index| {
+            if ((brush.contents & mask) == 0) continue;
             if (traceBrush(map, brush, start_map, end_map, extents)) |trace| {
                 if (trace.start_solid) {
                     result.hit = true;
@@ -156,6 +201,19 @@ pub const World = struct {
         }
 
         return result;
+    }
+
+    fn pointContentsMapPoint(self: *const World, map: *const bsp.Map, point: [3]f32, mask: i32) i32 {
+        var combined_contents: i32 = 0;
+
+        for (self.brushes) |brush| {
+            if (mask != -1 and (brush.contents & mask) == 0) continue;
+            if (pointInsideBrush(map, brush, point)) {
+                combined_contents |= brush.contents;
+            }
+        }
+
+        return combined_contents;
     }
 };
 
@@ -295,13 +353,33 @@ test "pointContents and segment trace hit a simple cube brush" {
     try std.testing.expectApproxEqAbs(-1.0, trace.normal.x, 0.01);
 }
 
+test "movement mask ignores trigger-only brushes" {
+    var map = try makeTestCubeMap(std.testing.allocator);
+    defer map.deinit();
+
+    try addCubeBrush(std.testing.allocator, &map, contents.trigger, "textures/test/trigger");
+
+    var world = try World.initFromMap(std.testing.allocator, &map);
+    defer world.deinit();
+
+    const trace = world.traceSegment(
+        &map,
+        .{ .x = 40.0, .y = 0.0, .z = 0.0 },
+        .{ .x = 60.0, .y = 0.0, .z = 0.0 },
+    );
+    try std.testing.expect(!trace.hit);
+
+    const trigger_contents = world.pointContentsMasked(&map, .{ .x = 50.0, .y = 0.0, .z = 0.0 }, contents.trigger);
+    try std.testing.expectEqual(contents.trigger, trigger_contents);
+}
+
 fn makeTestCubeMap(allocator: std.mem.Allocator) !bsp.Map {
     const textures = try allocator.alloc(bsp.MapTexture, 1);
     errdefer allocator.free(textures);
     textures[0] = .{
         .name = try allocator.dupe(u8, "textures/test/solid"),
         .flags = 0,
-        .contents = 1,
+        .contents = contents.solid,
     };
     errdefer allocator.free(textures[0].name);
 
@@ -355,5 +433,41 @@ fn makeTestCubeMap(allocator: std.mem.Allocator) !bsp.Map {
         .bounds_min = .{ .x = -32.0, .y = -32.0, .z = -32.0 },
         .bounds_max = .{ .x = 32.0, .y = 32.0, .z = 32.0 },
         .bounds_center = .{ .x = 0.0, .y = 0.0, .z = 0.0 },
+    };
+}
+
+fn addCubeBrush(allocator: std.mem.Allocator, map: *bsp.Map, brush_contents: i32, texture_name: []const u8) !void {
+    const texture_index = map.textures.len;
+    map.textures = try allocator.realloc(map.textures, texture_index + 1);
+    map.textures[texture_index] = .{
+        .name = try allocator.dupe(u8, texture_name),
+        .flags = 0,
+        .contents = brush_contents,
+    };
+
+    const plane_start = map.planes.len;
+    map.planes = try allocator.realloc(map.planes, plane_start + 6);
+    map.planes[plane_start + 0] = .{ .normal = .{ 1.0, 0.0, 0.0 }, .distance = 60.0 };
+    map.planes[plane_start + 1] = .{ .normal = .{ -1.0, 0.0, 0.0 }, .distance = -40.0 };
+    map.planes[plane_start + 2] = .{ .normal = .{ 0.0, 1.0, 0.0 }, .distance = 32.0 };
+    map.planes[plane_start + 3] = .{ .normal = .{ 0.0, -1.0, 0.0 }, .distance = 32.0 };
+    map.planes[plane_start + 4] = .{ .normal = .{ 0.0, 0.0, 1.0 }, .distance = 32.0 };
+    map.planes[plane_start + 5] = .{ .normal = .{ 0.0, 0.0, -1.0 }, .distance = 32.0 };
+
+    const side_start = map.brushsides.len;
+    map.brushsides = try allocator.realloc(map.brushsides, side_start + 6);
+    for (map.brushsides[side_start .. side_start + 6], 0..) |*brushside, index| {
+        brushside.* = .{
+            .plane = @intCast(plane_start + index),
+            .texture = @intCast(texture_index),
+        };
+    }
+
+    const brush_index = map.brushes.len;
+    map.brushes = try allocator.realloc(map.brushes, brush_index + 1);
+    map.brushes[brush_index] = .{
+        .brushside_index = @intCast(side_start),
+        .brushside_count = 6,
+        .texture = @intCast(texture_index),
     };
 }
