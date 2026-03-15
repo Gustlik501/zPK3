@@ -105,6 +105,48 @@ pub const VisData = struct {
     }
 };
 
+pub const ValidationReport = struct {
+    invalid_node_plane_refs: usize = 0,
+    invalid_node_child_refs: usize = 0,
+    invalid_leafsurface_ranges: usize = 0,
+    invalid_leafsurface_refs: usize = 0,
+    invalid_leafbrush_ranges: usize = 0,
+    invalid_leafbrush_refs: usize = 0,
+    invalid_model_face_ranges: usize = 0,
+    invalid_model_brush_ranges: usize = 0,
+    invalid_brushside_ranges: usize = 0,
+    invalid_brushside_plane_refs: usize = 0,
+    invalid_brush_texture_refs: usize = 0,
+    invalid_face_texture_refs: usize = 0,
+    invalid_face_effect_refs: usize = 0,
+    invalid_face_vertex_ranges: usize = 0,
+    invalid_face_meshvert_ranges: usize = 0,
+    invalid_effect_brush_refs: usize = 0,
+
+    pub fn issueCount(self: ValidationReport) usize {
+        return self.invalid_node_plane_refs +
+            self.invalid_node_child_refs +
+            self.invalid_leafsurface_ranges +
+            self.invalid_leafsurface_refs +
+            self.invalid_leafbrush_ranges +
+            self.invalid_leafbrush_refs +
+            self.invalid_model_face_ranges +
+            self.invalid_model_brush_ranges +
+            self.invalid_brushside_ranges +
+            self.invalid_brushside_plane_refs +
+            self.invalid_brush_texture_refs +
+            self.invalid_face_texture_refs +
+            self.invalid_face_effect_refs +
+            self.invalid_face_vertex_ranges +
+            self.invalid_face_meshvert_ranges +
+            self.invalid_effect_brush_refs;
+    }
+
+    pub fn isValid(self: ValidationReport) bool {
+        return self.issueCount() == 0;
+    }
+};
+
 pub const Map = struct {
     allocator: std.mem.Allocator,
     path: []const u8,
@@ -253,6 +295,124 @@ pub const Map = struct {
 
     pub fn parseEntities(self: *const Map, allocator: std.mem.Allocator) !entities.EntityList {
         return entities.parse(allocator, self.entities_source);
+    }
+
+    pub fn validate(self: *const Map) ValidationReport {
+        var report: ValidationReport = .{};
+
+        for (self.nodes) |node| {
+            if (node.plane < 0 or @as(usize, @intCast(node.plane)) >= self.planes.len) {
+                report.invalid_node_plane_refs += 1;
+            }
+
+            for (node.children) |child| {
+                if (child >= 0) {
+                    if (@as(usize, @intCast(child)) >= self.nodes.len) {
+                        report.invalid_node_child_refs += 1;
+                    }
+                } else {
+                    const leaf_index = -child - 1;
+                    if (leaf_index < 0 or @as(usize, @intCast(leaf_index)) >= self.leaves.len) {
+                        report.invalid_node_child_refs += 1;
+                    }
+                }
+            }
+        }
+
+        for (self.leaves) |leaf| {
+            if (leaf.leafsurface_index < 0 or leaf.leafsurface_count < 0) {
+                report.invalid_leafsurface_ranges += 1;
+            } else {
+                const start: usize = @intCast(leaf.leafsurface_index);
+                const count: usize = @intCast(leaf.leafsurface_count);
+                if (start + count > self.leafsurfaces.len) {
+                    report.invalid_leafsurface_ranges += 1;
+                } else {
+                    for (self.leafsurfaces[start .. start + count]) |face_index| {
+                        if (face_index < 0 or @as(usize, @intCast(face_index)) >= self.faces.len) {
+                            report.invalid_leafsurface_refs += 1;
+                        }
+                    }
+                }
+            }
+
+            if (leaf.leafbrush_index < 0 or leaf.leafbrush_count < 0) {
+                report.invalid_leafbrush_ranges += 1;
+            } else {
+                const start: usize = @intCast(leaf.leafbrush_index);
+                const count: usize = @intCast(leaf.leafbrush_count);
+                if (start + count > self.leafbrushes.len) {
+                    report.invalid_leafbrush_ranges += 1;
+                } else {
+                    for (self.leafbrushes[start .. start + count]) |brush_index| {
+                        if (brush_index < 0 or @as(usize, @intCast(brush_index)) >= self.brushes.len) {
+                            report.invalid_leafbrush_refs += 1;
+                        }
+                    }
+                }
+            }
+        }
+
+        for (self.models) |model| {
+            if (model.face_index < 0 or model.face_count < 0 or
+                @as(usize, @intCast(model.face_index)) + @as(usize, @intCast(model.face_count)) > self.faces.len)
+            {
+                report.invalid_model_face_ranges += 1;
+            }
+
+            if (model.brush_index < 0 or model.brush_count < 0 or
+                @as(usize, @intCast(model.brush_index)) + @as(usize, @intCast(model.brush_count)) > self.brushes.len)
+            {
+                report.invalid_model_brush_ranges += 1;
+            }
+        }
+
+        for (self.brushes) |brush| {
+            if (brush.brushside_index < 0 or brush.brushside_count < 0 or
+                @as(usize, @intCast(brush.brushside_index)) + @as(usize, @intCast(brush.brushside_count)) > self.brushsides.len)
+            {
+                report.invalid_brushside_ranges += 1;
+            }
+            if (brush.texture < 0 or @as(usize, @intCast(brush.texture)) >= self.textures.len) {
+                report.invalid_brush_texture_refs += 1;
+            }
+        }
+
+        for (self.brushsides) |brushside| {
+            if (brushside.plane < 0 or @as(usize, @intCast(brushside.plane)) >= self.planes.len) {
+                report.invalid_brushside_plane_refs += 1;
+            }
+        }
+
+        for (self.faces) |face| {
+            if (face.texture < 0 or @as(usize, @intCast(face.texture)) >= self.textures.len) {
+                report.invalid_face_texture_refs += 1;
+            }
+
+            if (face.effect >= 0 and @as(usize, @intCast(face.effect)) >= self.effects.len) {
+                report.invalid_face_effect_refs += 1;
+            }
+
+            if (face.vertex_index < 0 or face.vertex_count < 0 or
+                @as(usize, @intCast(face.vertex_index)) + @as(usize, @intCast(face.vertex_count)) > self.vertices.len)
+            {
+                report.invalid_face_vertex_ranges += 1;
+            }
+
+            if (face.meshvert_index < 0 or face.meshvert_count < 0 or
+                @as(usize, @intCast(face.meshvert_index)) + @as(usize, @intCast(face.meshvert_count)) > self.meshverts.len)
+            {
+                report.invalid_face_meshvert_ranges += 1;
+            }
+        }
+
+        for (self.effects) |effect| {
+            if (effect.brush >= 0 and @as(usize, @intCast(effect.brush)) >= self.brushes.len) {
+                report.invalid_effect_brush_refs += 1;
+            }
+        }
+
+        return report;
     }
 };
 

@@ -142,7 +142,34 @@ const Parser = struct {
     }
 
     fn skipWhitespace(self: *Parser) void {
-        while (!self.eof() and std.ascii.isWhitespace(self.source[self.index])) : (self.index += 1) {}
+        while (!self.eof()) {
+            const ch = self.source[self.index];
+            if (ch == 0 or std.ascii.isWhitespace(ch)) {
+                self.index += 1;
+                continue;
+            }
+
+            if (ch == '/' and self.index + 1 < self.source.len) {
+                const next = self.source[self.index + 1];
+                if (next == '/') {
+                    self.index += 2;
+                    while (!self.eof() and self.source[self.index] != '\n') : (self.index += 1) {}
+                    continue;
+                }
+                if (next == '*') {
+                    self.index += 2;
+                    while (self.index + 1 < self.source.len) : (self.index += 1) {
+                        if (self.source[self.index] == '*' and self.source[self.index + 1] == '/') {
+                            self.index += 2;
+                            break;
+                        }
+                    }
+                    continue;
+                }
+            }
+
+            break;
+        }
     }
 
     fn expect(self: *Parser, byte: u8) !void {

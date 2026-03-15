@@ -23,6 +23,10 @@ pub fn run(allocator: std.mem.Allocator) !void {
     var map = try q3.bsp.Map.init(allocator, map_ref.path, map_bytes);
     defer map.deinit();
 
+    const validation = map.validate();
+    var entity_list = try map.parseEntities(allocator);
+    defer entity_list.deinit();
+
     rl.setConfigFlags(.{ .window_resizable = true, .msaa_4x_hint = true });
     rl.initWindow(1600, 900, "quake3 pk3 viewer");
     defer rl.closeWindow();
@@ -45,7 +49,7 @@ pub fn run(allocator: std.mem.Allocator) !void {
         renderer.draw();
         rl.endMode3D();
 
-        drawOverlay(map, renderer.stats, source_path);
+        drawOverlay(map, renderer.stats, source_path, entity_list.items.len, validation.issueCount());
     }
 }
 
@@ -170,9 +174,15 @@ fn normalize(v: rl.Vector3) rl.Vector3 {
     };
 }
 
-fn drawOverlay(map: q3.bsp.Map, stats: q3.renderer.SceneStats, source_path: []const u8) void {
-    rl.drawRectangle(12, 12, 520, 126, rl.fade(.black, 0.72));
-    rl.drawRectangleLines(12, 12, 520, 126, .dark_gray);
+fn drawOverlay(
+    map: q3.bsp.Map,
+    stats: q3.renderer.SceneStats,
+    source_path: []const u8,
+    entity_count: usize,
+    validation_issue_count: usize,
+) void {
+    rl.drawRectangle(12, 12, 520, 148, rl.fade(.black, 0.72));
+    rl.drawRectangleLines(12, 12, 520, 148, .dark_gray);
     rl.drawText("Modular Quake 3 PK3 viewer", 24, 24, 24, .ray_white);
 
     var line_buf: [256]u8 = undefined;
@@ -190,5 +200,12 @@ fn drawOverlay(map: q3.bsp.Map, stats: q3.renderer.SceneStats, source_path: []co
     const source_line = std.fmt.bufPrintZ(&line_buf, "PK3 source: {s}", .{source_path}) catch return;
     rl.drawText(source_line, 24, 100, 18, .light_gray);
 
-    rl.drawText("Controls: RMB look, WASD fly, E/Q up-down, Shift boost, wheel FOV, F1 wire, F2 fullbright, F3 cull", 24, 122, 18, .gray);
+    const runtime_line = std.fmt.bufPrintZ(
+        &line_buf,
+        "Entities: {d}  Validation issues: {d}",
+        .{ entity_count, validation_issue_count },
+    ) catch return;
+    rl.drawText(runtime_line, 24, 122, 18, if (validation_issue_count == 0) .light_gray else .orange);
+
+    rl.drawText("Controls: RMB look, WASD fly, E/Q up-down, Shift boost, wheel FOV, F1 wire, F2 fullbright, F3 cull", 24, 144, 18, .gray);
 }
