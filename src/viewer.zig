@@ -60,6 +60,7 @@ pub fn run(allocator: std.mem.Allocator) !void {
     );
 
     var camera = defaultCamera(toRlVector3(map.bounds_center));
+    applyCameraOverrides(&camera, options);
     var controller = CameraController.init(camera);
     var inspector: InspectorState = .{};
     var profiler: FrameProfiler = .{};
@@ -154,6 +155,7 @@ pub fn run(allocator: std.mem.Allocator) !void {
                 &entity_list,
                 &collision_world,
                 &renderer,
+                camera,
                 validation.issueCount(),
             );
             break;
@@ -166,6 +168,8 @@ const RunOptions = struct {
     requested_bsp: ?[]const u8 = null,
     dump_stats: bool = false,
     max_frames: usize = 1,
+    camera_position: ?rl.Vector3 = null,
+    camera_target: ?rl.Vector3 = null,
 };
 
 fn parseRunOptions(args: []const []const u8) !RunOptions {
@@ -184,6 +188,14 @@ fn parseRunOptions(args: []const []const u8) !RunOptions {
             if (i >= args.len) return error.MissingFramesValue;
             options.max_frames = try std.fmt.parseInt(usize, args[i], 10);
             if (options.max_frames == 0) options.max_frames = 1;
+            continue;
+        }
+        if (std.mem.eql(u8, arg, "--camera")) {
+            options.camera_position = try parseVector3Option(args, &i, error.MissingCameraValue);
+            continue;
+        }
+        if (std.mem.eql(u8, arg, "--target")) {
+            options.camera_target = try parseVector3Option(args, &i, error.MissingTargetValue);
             continue;
         }
         if (std.mem.startsWith(u8, arg, "--")) {
@@ -214,6 +226,32 @@ fn defaultCamera(center: rl.Vector3) rl.Camera {
         .fovy = 65.0,
         .projection = .perspective,
     };
+}
+
+fn applyCameraOverrides(camera: *rl.Camera, options: RunOptions) void {
+    if (options.camera_position) |position| {
+        camera.position = position;
+    }
+    if (options.camera_target) |target| {
+        camera.target = target;
+    } else if (options.camera_position != null) {
+        camera.target = .{
+            .x = camera.position.x,
+            .y = camera.position.y,
+            .z = camera.position.z - 1.0,
+        };
+    }
+}
+
+fn parseVector3Option(args: []const []const u8, index: *usize, missing_error: anyerror) !rl.Vector3 {
+    if (index.* + 3 >= args.len) return missing_error;
+    index.* += 1;
+    const x = try std.fmt.parseFloat(f32, args[index.*]);
+    index.* += 1;
+    const y = try std.fmt.parseFloat(f32, args[index.*]);
+    index.* += 1;
+    const z = try std.fmt.parseFloat(f32, args[index.*]);
+    return .{ .x = x, .y = y, .z = z };
 }
 
 fn toRlVector3(v: q3.math.Vec3) rl.Vector3 {
@@ -778,6 +816,7 @@ fn dumpStatsReport(
     entity_list: *const q3.entities.EntityList,
     collision_world: *const q3.collision.World,
     renderer: *const q3.renderer.SceneRenderer,
+    camera: rl.Camera,
     validation_issue_count: usize,
 ) void {
     const tracked_total = totalTrackedBytes(map, entity_list, collision_world, renderer);
@@ -792,6 +831,17 @@ fn dumpStatsReport(
     std.debug.print("source: {s}\n", .{options.source_path});
     std.debug.print("requested_bsp: {s}\n", .{options.requested_bsp orelse map.path});
     std.debug.print("frames: {d}\n", .{options.max_frames});
+    std.debug.print(
+        "camera: pos=({d:.2}, {d:.2}, {d:.2}) target=({d:.2}, {d:.2}, {d:.2})\n",
+        .{
+            camera.position.x,
+            camera.position.y,
+            camera.position.z,
+            camera.target.x,
+            camera.target.y,
+            camera.target.z,
+        },
+    );
     std.debug.print("fps: {d}\n", .{rl.getFPS()});
     std.debug.print(
         "frame_ms: {d:.3} cpu_ms: {d:.3} present_ms: {d:.3}\n",
