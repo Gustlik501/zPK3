@@ -7,43 +7,63 @@ pub fn run(allocator: std.mem.Allocator) !void {
     const args = try std.process.argsAlloc(allocator);
     defer std.process.argsFree(allocator, args);
 
-    const source_path = if (args.len >= 2) args[1] else "assets/maps";
-    const requested_bsp = if (args.len >= 3) args[2] else null;
+    const options = try parseRunOptions(args);
+    var startup_profile: StartupProfile = .{};
+    startup_profile.capture("process_start", null);
 
-    var packs = try q3.archive.Pk3Collection.initFromPath(allocator, source_path);
+    if (options.dump_stats) {
+        rl.setTraceLogLevel(.warning);
+    }
+
+    var packs = try q3.archive.Pk3Collection.initFromPath(allocator, options.source_path);
     defer packs.deinit();
+    startup_profile.capture("pk3_collection", null);
 
-    const map_ref = if (requested_bsp) |name|
+    const map_ref = if (options.requested_bsp) |name|
         packs.findMap(name) orelse return error.MapNotFound
     else
         packs.findFirstMap() orelse return error.NoMapsFound;
 
     const map_bytes = try packs.readFileAlloc(allocator, map_ref.path);
     defer allocator.free(map_bytes);
+    startup_profile.capture("map_bytes_read", null);
 
     var map = try q3.bsp.Map.init(allocator, map_ref.path, map_bytes);
     defer map.deinit();
+    startup_profile.capture("bsp_parsed", map.estimatedMemoryBytes());
 
     const validation = map.validate();
     var entity_list = try map.parseEntities(allocator);
     defer entity_list.deinit();
+    startup_profile.capture("entities_parsed", map.estimatedMemoryBytes() + entity_list.estimatedMemoryBytes());
     var collision_world = try q3.collision.World.initFromMap(allocator, &map);
     defer collision_world.deinit();
+    startup_profile.capture(
+        "collision_built",
+        map.estimatedMemoryBytes() + entity_list.estimatedMemoryBytes() + collision_world.estimatedMemoryBytes(),
+    );
 
     rl.setConfigFlags(.{ .window_resizable = true, .msaa_4x_hint = true });
     rl.initWindow(1600, 900, "quake3 pk3 viewer");
     defer rl.closeWindow();
+    startup_profile.capture("window_ready", null);
 
     imgui.setup(true);
     defer imgui.shutdown();
+    startup_profile.capture("imgui_ready", null);
 
     var renderer = try q3.renderer.SceneRenderer.init(allocator, &packs, &map);
     defer renderer.deinit();
+    startup_profile.capture(
+        "renderer_ready",
+        totalTrackedBytes(&map, &entity_list, &collision_world, &renderer),
+    );
 
     var camera = defaultCamera(toRlVector3(map.bounds_center));
     var controller = CameraController.init(camera);
     var inspector: InspectorState = .{};
     var profiler: FrameProfiler = .{};
+    var frame_count: usize = 0;
     rl.setTargetFPS(144);
 
     while (!rl.windowShouldClose()) {
@@ -85,7 +105,7 @@ pub fn run(allocator: std.mem.Allocator) !void {
                 &map,
                 &entity_list,
                 &collision_world,
-                source_path,
+                options.source_path,
                 &renderer,
                 validation.issueCount(),
                 inspector.visible,
@@ -116,7 +136,70 @@ pub fn run(allocator: std.mem.Allocator) !void {
             .present_wait_ns = nsBetween(cpu_frame_end_ns, frame_end_ns),
             .total_frame_ns = nsBetween(frame_start_ns, frame_end_ns),
         });
+
+        frame_count += 1;
+        if (frame_count == 1) {
+            startup_profile.capture(
+                "first_frame",
+                totalTrackedBytes(&map, &entity_list, &collision_world, &renderer),
+            );
+        }
+
+        if (options.dump_stats and frame_count >= options.max_frames) {
+            dumpStatsReport(
+                options,
+                &startup_profile,
+                &profiler,
+                &map,
+                &entity_list,
+                &collision_world,
+                &renderer,
+                validation.issueCount(),
+            );
+            break;
+        }
     }
+}
+
+const RunOptions = struct {
+    source_path: []const u8 = "assets/maps",
+    requested_bsp: ?[]const u8 = null,
+    dump_stats: bool = false,
+    max_frames: usize = 1,
+};
+
+fn parseRunOptions(args: []const []const u8) !RunOptions {
+    var options: RunOptions = .{};
+    var positional_index: usize = 0;
+    var i: usize = 1;
+
+    while (i < args.len) : (i += 1) {
+        const arg = args[i];
+        if (std.mem.eql(u8, arg, "--dump-stats")) {
+            options.dump_stats = true;
+            continue;
+        }
+        if (std.mem.eql(u8, arg, "--frames")) {
+            i += 1;
+            if (i >= args.len) return error.MissingFramesValue;
+            options.max_frames = try std.fmt.parseInt(usize, args[i], 10);
+            if (options.max_frames == 0) options.max_frames = 1;
+            continue;
+        }
+        if (std.mem.startsWith(u8, arg, "--")) {
+            return error.UnknownOption;
+        }
+
+        switch (positional_index) {
+            0 => options.source_path = arg,
+            1 => options.requested_bsp = arg,
+            else => return error.TooManyArguments,
+        }
+        positional_index += 1;
+    }
+
+    if (options.dump_stats and options.max_frames == 0) options.max_frames = 1;
+    return options;
 }
 
 fn defaultCamera(center: rl.Vector3) rl.Camera {
@@ -399,6 +482,9 @@ const FrameProfiler = struct {
 const ProcessMemoryStats = struct {
     rss_bytes: ?usize = null,
     virtual_bytes: ?usize = null,
+    rss_anon_bytes: ?usize = null,
+    rss_file_bytes: ?usize = null,
+    rss_shmem_bytes: ?usize = null,
     last_refresh_ms: i64 = 0,
 
     fn refresh(self: *ProcessMemoryStats) void {
@@ -408,13 +494,51 @@ const ProcessMemoryStats = struct {
 
         var buffer: [16 * 1024]u8 = undefined;
         const data = readProcSelfStatus(&buffer) catch {
-            self.rss_bytes = null;
-            self.virtual_bytes = null;
+            self.* = .{ .last_refresh_ms = now_ms };
             return;
         };
 
         self.rss_bytes = parseProcStatusKiB(data, "VmRSS:");
         self.virtual_bytes = parseProcStatusKiB(data, "VmSize:");
+        self.rss_anon_bytes = parseProcStatusKiB(data, "RssAnon:");
+        self.rss_file_bytes = parseProcStatusKiB(data, "RssFile:");
+        self.rss_shmem_bytes = parseProcStatusKiB(data, "RssShmem:");
+    }
+
+    fn sampleNow() ProcessMemoryStats {
+        var stats: ProcessMemoryStats = .{};
+        stats.last_refresh_ms = std.time.milliTimestamp();
+
+        var buffer: [16 * 1024]u8 = undefined;
+        const data = readProcSelfStatus(&buffer) catch return stats;
+
+        stats.rss_bytes = parseProcStatusKiB(data, "VmRSS:");
+        stats.virtual_bytes = parseProcStatusKiB(data, "VmSize:");
+        stats.rss_anon_bytes = parseProcStatusKiB(data, "RssAnon:");
+        stats.rss_file_bytes = parseProcStatusKiB(data, "RssFile:");
+        stats.rss_shmem_bytes = parseProcStatusKiB(data, "RssShmem:");
+        return stats;
+    }
+};
+
+const PhaseSnapshot = struct {
+    label: []const u8,
+    process_memory: ProcessMemoryStats,
+    tracked_bytes: ?usize = null,
+};
+
+const StartupProfile = struct {
+    snapshots: [16]PhaseSnapshot = undefined,
+    count: usize = 0,
+
+    fn capture(self: *StartupProfile, label: []const u8, tracked_bytes: ?usize) void {
+        if (self.count >= self.snapshots.len) return;
+        self.snapshots[self.count] = .{
+            .label = label,
+            .process_memory = ProcessMemoryStats.sampleNow(),
+            .tracked_bytes = tracked_bytes,
+        };
+        self.count += 1;
     }
 };
 
@@ -448,23 +572,16 @@ fn drawRuntimeStatsWindow(
     var cache_mem_buf: [32]u8 = undefined;
     var rss_mem_buf: [32]u8 = undefined;
     var vmem_mem_buf: [32]u8 = undefined;
+    var anon_mem_buf: [32]u8 = undefined;
+    var file_mem_buf: [32]u8 = undefined;
+    var shmem_mem_buf: [32]u8 = undefined;
     var untracked_mem_buf: [32]u8 = undefined;
     const parsed_bsp_bytes = map.estimatedMemoryBytes();
     const entities_bytes = entity_list.estimatedMemoryBytes();
     const collision_bytes = collision_world.estimatedMemoryBytes();
     const object_bytes = renderer.estimatedSceneObjectMemoryBytes();
     const cache_meta_bytes = renderer.estimatedCacheMetadataMemoryBytes();
-    const total_tracked_bytes =
-        renderer.stats.geometry_memory_bytes +
-        renderer.stats.wireframe_memory_bytes +
-        renderer.stats.material_memory_bytes +
-        renderer.stats.texture_memory_bytes +
-        renderer.stats.lightmap_memory_bytes +
-        parsed_bsp_bytes +
-        entities_bytes +
-        collision_bytes +
-        object_bytes +
-        cache_meta_bytes;
+    const total_tracked_bytes = totalTrackedBytes(map, entity_list, collision_world, renderer);
     const frame_line = std.fmt.bufPrintZ(
         &line_buf,
         "FPS {d}  frame {d:.2} ms  CPU {d:.2} ms  present {d:.2} ms",
@@ -574,6 +691,16 @@ fn drawRuntimeStatsWindow(
             },
         ) catch return;
         imgui.text(process_line);
+        const rss_split_line = std.fmt.bufPrintZ(
+            &line_buf,
+            "RSS split: anon {s}  file {s}  shmem {s}",
+            .{
+                formatMemorySizeZ(&anon_mem_buf, profiler.process_memory.rss_anon_bytes orelse 0),
+                formatMemorySizeZ(&file_mem_buf, profiler.process_memory.rss_file_bytes orelse 0),
+                formatMemorySizeZ(&shmem_mem_buf, profiler.process_memory.rss_shmem_bytes orelse 0),
+            },
+        ) catch return;
+        imgui.text(rss_split_line);
     } else {
         imgui.text("Process: RSS unavailable on this platform/runtime.");
     }
@@ -605,6 +732,140 @@ fn drawRuntimeStatsWindow(
         imgui.text(selected_line);
     } else {
         imgui.text("Selected: none");
+    }
+}
+
+fn totalTrackedBytes(
+    map: *const q3.bsp.Map,
+    entity_list: *const q3.entities.EntityList,
+    collision_world: *const q3.collision.World,
+    renderer: *const q3.renderer.SceneRenderer,
+) usize {
+    return renderer.stats.geometry_memory_bytes +
+        renderer.stats.wireframe_memory_bytes +
+        renderer.stats.material_memory_bytes +
+        renderer.stats.texture_memory_bytes +
+        renderer.stats.lightmap_memory_bytes +
+        map.estimatedMemoryBytes() +
+        entity_list.estimatedMemoryBytes() +
+        collision_world.estimatedMemoryBytes() +
+        renderer.estimatedSceneObjectMemoryBytes() +
+        renderer.estimatedCacheMetadataMemoryBytes();
+}
+
+fn dumpStatsReport(
+    options: RunOptions,
+    startup_profile: *const StartupProfile,
+    profiler: *const FrameProfiler,
+    map: *const q3.bsp.Map,
+    entity_list: *const q3.entities.EntityList,
+    collision_world: *const q3.collision.World,
+    renderer: *const q3.renderer.SceneRenderer,
+    validation_issue_count: usize,
+) void {
+    const tracked_total = totalTrackedBytes(map, entity_list, collision_world, renderer);
+    const bsp_bytes = map.estimatedMemoryBytes();
+    const entities_bytes = entity_list.estimatedMemoryBytes();
+    const collision_bytes = collision_world.estimatedMemoryBytes();
+    const object_bytes = renderer.estimatedSceneObjectMemoryBytes();
+    const cache_meta_bytes = renderer.estimatedCacheMetadataMemoryBytes();
+
+    std.debug.print("=== zPK3 Runtime Stats ===\n", .{});
+    std.debug.print("map: {s}\n", .{map.path});
+    std.debug.print("source: {s}\n", .{options.source_path});
+    std.debug.print("requested_bsp: {s}\n", .{options.requested_bsp orelse map.path});
+    std.debug.print("frames: {d}\n", .{options.max_frames});
+    std.debug.print("fps: {d}\n", .{rl.getFPS()});
+    std.debug.print(
+        "frame_ms: {d:.3} cpu_ms: {d:.3} present_ms: {d:.3}\n",
+        .{ rl.getFrameTime() * 1000.0, profiler.cpu_frame.current_ms, profiler.present_wait.current_ms },
+    );
+    std.debug.print(
+        "timings_ms: input={d:.3} collision={d:.3} world_draw={d:.3} imgui={d:.3} overlay={d:.3}\n",
+        .{
+            profiler.input.current_ms,
+            profiler.collision.current_ms,
+            profiler.world_draw.current_ms,
+            profiler.ui.current_ms,
+            profiler.overlay.current_ms,
+        },
+    );
+    std.debug.print(
+        "content: entities={d} validation_issues={d} scene_objects={d}\n",
+        .{ entity_list.items.len, validation_issue_count, renderer.scene_objects.len },
+    );
+    std.debug.print(
+        "batches: total={d} drawn={d} faces={d} verts={d} drawn_verts={d}\n",
+        .{
+            renderer.stats.batch_count,
+            renderer.stats.drawn_batch_count,
+            renderer.stats.face_count,
+            renderer.stats.vertex_count,
+            renderer.stats.drawn_vertex_count,
+        },
+    );
+    std.debug.print(
+        "textures: loaded={d} bytes={d} lightmaps={d} lightmap_bytes={d} missing={d}\n",
+        .{
+            renderer.stats.loaded_texture_count,
+            renderer.stats.texture_memory_bytes,
+            renderer.stats.lightmap_texture_count,
+            renderer.stats.lightmap_memory_bytes,
+            renderer.stats.missing_texture_count,
+        },
+    );
+    std.debug.print(
+        "scene: models={d} bsp_submodels={d} world_batches={d} submodel_batches={d} animated_batches={d}\n",
+        .{
+            renderer.stats.model_instance_count,
+            renderer.stats.bsp_submodel_instance_count,
+            renderer.stats.world_batch_count,
+            renderer.stats.submodel_batch_count,
+            renderer.stats.animated_batch_count,
+        },
+    );
+    std.debug.print(
+        "tracked_bytes: total={d} bsp={d} entities={d} collision={d} scene_objects={d} cache_meta={d} geometry={d} wireframe={d} materials={d} textures={d} lightmaps={d}\n",
+        .{
+            tracked_total,
+            bsp_bytes,
+            entities_bytes,
+            collision_bytes,
+            object_bytes,
+            cache_meta_bytes,
+            renderer.stats.geometry_memory_bytes,
+            renderer.stats.wireframe_memory_bytes,
+            renderer.stats.material_memory_bytes,
+            renderer.stats.texture_memory_bytes,
+            renderer.stats.lightmap_memory_bytes,
+        },
+    );
+    std.debug.print(
+        "process_bytes: rss={?d} vmsize={?d} rss_anon={?d} rss_file={?d} rss_shmem={?d} untracked_gap={?d}\n",
+        .{
+            profiler.process_memory.rss_bytes,
+            profiler.process_memory.virtual_bytes,
+            profiler.process_memory.rss_anon_bytes,
+            profiler.process_memory.rss_file_bytes,
+            profiler.process_memory.rss_shmem_bytes,
+            if (profiler.process_memory.rss_bytes) |rss| rss -| tracked_total else null,
+        },
+    );
+
+    std.debug.print("startup_phases:\n", .{});
+    for (startup_profile.snapshots[0..startup_profile.count]) |snapshot| {
+        std.debug.print(
+            "  - {s}: rss={?d} vmsize={?d} anon={?d} file={?d} shmem={?d} tracked={?d}\n",
+            .{
+                snapshot.label,
+                snapshot.process_memory.rss_bytes,
+                snapshot.process_memory.virtual_bytes,
+                snapshot.process_memory.rss_anon_bytes,
+                snapshot.process_memory.rss_file_bytes,
+                snapshot.process_memory.rss_shmem_bytes,
+                snapshot.tracked_bytes,
+            },
+        );
     }
 }
 
