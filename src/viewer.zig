@@ -222,8 +222,8 @@ fn drawOverlay(
 ) void {
     const stats = renderer.stats;
 
-    rl.drawRectangle(12, 12, 660, 274, rl.fade(.black, 0.72));
-    rl.drawRectangleLines(12, 12, 660, 274, .dark_gray);
+    rl.drawRectangle(12, 12, 660, 296, rl.fade(.black, 0.72));
+    rl.drawRectangleLines(12, 12, 660, 296, .dark_gray);
     rl.drawText("Modular Quake 3 PK3 viewer", 24, 24, 24, .ray_white);
 
     var line_buf: [384]u8 = undefined;
@@ -316,8 +316,21 @@ fn drawOverlay(
 
     const ui_line = std.fmt.bufPrintZ(&line_buf, "UI: inspector={s}", .{if (inspector_visible) "on" else "off"}) catch return;
     rl.drawText(ui_line, 24, 210, 18, .gray);
-    rl.drawText("Controls: RMB look, WASD fly, E/Q up-down, Shift boost, wheel FOV, Tab cycle objects", 24, 232, 18, .gray);
-    rl.drawText("F1 wire, F2 fullbright, F3 cull, F4 objects, F5 world, F6 submodels, F7 isolate, F8 inspector", 24, 254, 18, .gray);
+
+    const debug_line = std.fmt.bufPrintZ(
+        &line_buf,
+        "Debug: wire={s} fullbright={s} cull={s} objects={s}",
+        .{
+            if (renderer.draw_wireframe) "on" else "off",
+            if (renderer.fullbright) "on" else "off",
+            if (renderer.backface_culling) "on" else "off",
+            if (renderer.draw_scene_objects) "on" else "off",
+        },
+    ) catch return;
+    rl.drawText(debug_line, 24, 232, 18, if (renderer.draw_wireframe) .orange else .gray);
+
+    rl.drawText("Controls: RMB look, WASD fly, E/Q up-down, Shift boost, wheel FOV, Tab cycle objects", 24, 254, 18, .gray);
+    rl.drawText("F1 wire, F2 fullbright, F3 cull, F4 objects, F5 world, F6 submodels, F7 isolate, F8 inspector", 24, 276, 18, .gray);
 }
 
 const InspectorState = struct {
@@ -343,6 +356,9 @@ fn drawInspector(
     _ = imgui.checkbox("Draw world geometry", &renderer.draw_world_geometry);
     _ = imgui.checkbox("Draw submodel geometry", &renderer.draw_submodel_geometry);
     _ = imgui.checkbox("Isolate selected BSP submodel", &renderer.isolate_selected_submodel);
+    _ = imgui.checkbox("Wireframe renderer", &renderer.draw_wireframe);
+    _ = imgui.checkbox("Fullbright renderer", &renderer.fullbright);
+    _ = imgui.checkbox("Backface culling", &renderer.backface_culling);
 
     if (imgui.button("Previous")) renderer.selectPreviousSceneObject();
     imgui.sameLine();
