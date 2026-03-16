@@ -96,63 +96,80 @@ const SurfaceBillboard = struct {
 };
 
 const CameraFrustum = struct {
-    view_projection: rl.Matrix,
+    kind: rl.CameraProjection,
+    position: rl.Vector3,
+    forward: rl.Vector3,
+    right: rl.Vector3,
+    up: rl.Vector3,
+    aspect: f32,
+    tan_half_fovy: f32,
+    ortho_half_width: f32,
+    ortho_half_height: f32,
+    near_plane: f32,
+    far_plane: f32,
 
     fn fromCamera(camera: rl.Camera) CameraFrustum {
-        const aspect = @as(f64, @floatFromInt(@max(rl.getScreenWidth(), 1))) /
-            @as(f64, @floatFromInt(@max(rl.getScreenHeight(), 1)));
-        const projection = switch (camera.projection) {
-            .orthographic => raymath.matrixOrtho(
-                -camera.fovy * aspect * 0.5,
-                camera.fovy * aspect * 0.5,
-                -@as(f64, camera.fovy) * 0.5,
-                @as(f64, camera.fovy) * 0.5,
-                0.01,
-                10_000.0,
-            ),
-            .perspective => raymath.matrixPerspective(
-                std.math.degreesToRadians(camera.fovy),
-                aspect,
-                0.01,
-                10_000.0,
-            ),
+        const aspect = @as(f32, @floatFromInt(@max(rl.getScreenWidth(), 1))) /
+            @as(f32, @floatFromInt(@max(rl.getScreenHeight(), 1)));
+        const forward = normalizeRlVector3(raymath.vector3Subtract(camera.target, camera.position));
+        const base_up = normalizeRlVector3(camera.up);
+        const right = normalizeRlVector3(raymath.vector3CrossProduct(forward, base_up));
+        const up = normalizeRlVector3(raymath.vector3CrossProduct(right, forward));
+        const near_plane: f32 = 0.01;
+        const far_plane: f32 = 10_000.0;
+        const half_fovy = std.math.degreesToRadians(camera.fovy) * 0.5;
+
+        return .{
+            .kind = camera.projection,
+            .position = camera.position,
+            .forward = forward,
+            .right = right,
+            .up = up,
+            .aspect = aspect,
+            .tan_half_fovy = @floatCast(@tan(half_fovy)),
+            .ortho_half_width = camera.fovy * aspect * 0.5,
+            .ortho_half_height = camera.fovy * 0.5,
+            .near_plane = near_plane,
+            .far_plane = far_plane,
         };
-        const view = camera.getMatrix();
-        return .{ .view_projection = raymath.matrixMultiply(projection, view) };
     }
 
     fn containsBox(self: CameraFrustum, bounds: rl.BoundingBox) bool {
-        const corners = [_]rl.Vector3{
-            .{ .x = bounds.min.x, .y = bounds.min.y, .z = bounds.min.z },
-            .{ .x = bounds.max.x, .y = bounds.min.y, .z = bounds.min.z },
-            .{ .x = bounds.min.x, .y = bounds.max.y, .z = bounds.min.z },
-            .{ .x = bounds.max.x, .y = bounds.max.y, .z = bounds.min.z },
-            .{ .x = bounds.min.x, .y = bounds.min.y, .z = bounds.max.z },
-            .{ .x = bounds.max.x, .y = bounds.min.y, .z = bounds.max.z },
-            .{ .x = bounds.min.x, .y = bounds.max.y, .z = bounds.max.z },
-            .{ .x = bounds.max.x, .y = bounds.max.y, .z = bounds.max.z },
+        const center: rl.Vector3 = .{
+            .x = (bounds.min.x + bounds.max.x) * 0.5,
+            .y = (bounds.min.y + bounds.max.y) * 0.5,
+            .z = (bounds.min.z + bounds.max.z) * 0.5,
         };
+        const extents = .{
+            .x = (bounds.max.x - bounds.min.x) * 0.5,
+            .y = (bounds.max.y - bounds.min.y) * 0.5,
+            .z = (bounds.max.z - bounds.min.z) * 0.5,
+        };
+        const radius = @sqrt(extents.x * extents.x + extents.y * extents.y + extents.z * extents.z);
+        const offset = raymath.vector3Subtract(center, self.position);
 
-        var left_outside = true;
-        var right_outside = true;
-        var bottom_outside = true;
-        var top_outside = true;
-        var near_outside = true;
-        var far_outside = true;
+        const forward_distance = dotRlVector3(offset, self.forward);
+        if (forward_distance < -radius) return false;
+        if (forward_distance > self.far_plane + radius) return false;
 
-        for (corners) |corner| {
-            const clip = transformPoint(self.view_projection, corner);
-            const w = if (@abs(clip.w) <= 0.00001) 0.00001 else clip.w;
+        const right_distance = @abs(dotRlVector3(offset, self.right));
+        const up_distance = @abs(dotRlVector3(offset, self.up));
 
-            if (clip.x >= -w) left_outside = false;
-            if (clip.x <= w) right_outside = false;
-            if (clip.y >= -w) bottom_outside = false;
-            if (clip.y <= w) top_outside = false;
-            if (clip.z >= -w) near_outside = false;
-            if (clip.z <= w) far_outside = false;
+        switch (self.kind) {
+            .orthographic => {
+                if (right_distance > self.ortho_half_width + radius) return false;
+                if (up_distance > self.ortho_half_height + radius) return false;
+                return true;
+            },
+            .perspective => {
+                const clamped_forward = @max(forward_distance, 0.0);
+                const half_height = clamped_forward * self.tan_half_fovy;
+                const half_width = half_height * self.aspect;
+                if (right_distance > half_width + radius) return false;
+                if (up_distance > half_height + radius) return false;
+                return true;
+            },
         }
-
-        return !(left_outside or right_outside or bottom_outside or top_outside or near_outside or far_outside);
     }
 };
 
@@ -791,22 +808,6 @@ fn wrapUnitOffset(speed: f32, time_seconds: f64) f32 {
     if (speed == 0.0) return 0.0;
     const value = @as(f64, speed) * time_seconds;
     return @floatCast(value - @floor(value));
-}
-
-const ClipPoint = struct {
-    x: f32,
-    y: f32,
-    z: f32,
-    w: f32,
-};
-
-fn transformPoint(matrix: rl.Matrix, point: rl.Vector3) ClipPoint {
-    return .{
-        .x = matrix.m0 * point.x + matrix.m4 * point.y + matrix.m8 * point.z + matrix.m12,
-        .y = matrix.m1 * point.x + matrix.m5 * point.y + matrix.m9 * point.z + matrix.m13,
-        .z = matrix.m2 * point.x + matrix.m6 * point.y + matrix.m10 * point.z + matrix.m14,
-        .w = matrix.m3 * point.x + matrix.m7 * point.y + matrix.m11 * point.z + matrix.m15,
-    };
 }
 
 const TextureCache = struct {
@@ -1843,6 +1844,10 @@ fn normalizeRlVector3(v: rl.Vector3) rl.Vector3 {
         .y = v.y * inverse_length,
         .z = v.z * inverse_length,
     };
+}
+
+fn dotRlVector3(a: rl.Vector3, b: rl.Vector3) f32 {
+    return a.x * b.x + a.y * b.y + a.z * b.z;
 }
 
 fn toBoundingBox(model: bsp.Model) rl.BoundingBox {
