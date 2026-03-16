@@ -43,7 +43,7 @@ pub fn run(allocator: std.mem.Allocator) !void {
         map.estimatedMemoryBytes() + entity_list.estimatedMemoryBytes() + collision_world.estimatedMemoryBytes(),
     );
 
-    rl.setConfigFlags(.{ .window_resizable = true, .msaa_4x_hint = true });
+    rl.setConfigFlags(.{ .window_resizable = true });
     rl.initWindow(1600, 900, "quake3 pk3 viewer");
     defer rl.closeWindow();
     startup_profile.capture("window_ready", null);
@@ -407,7 +407,7 @@ fn drawOverlay(
 }
 
 const InspectorState = struct {
-    visible: bool = false,
+    visible: bool = true,
     stats_visible: bool = true,
     capture_mouse: bool = false,
     capture_keyboard: bool = false,
@@ -441,6 +441,7 @@ fn drawInspector(
     const margin: f32 = 16.0;
     imgui.setNextWindowPos(@as(f32, @floatFromInt(rl.getScreenWidth())) - window_width - margin, margin);
     imgui.setNextWindowSize(430.0, 620.0);
+    imgui.setNextWindowCollapsed(true);
     const open = imgui.beginWindow("Scene Inspector", &inspector.visible);
     defer imgui.endWindow();
     if (!open) return;

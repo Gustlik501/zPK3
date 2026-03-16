@@ -34,6 +34,10 @@ pub fn setNextWindowPos(x: f32, y: f32) void {
     c.zpk3ImGuiSetNextWindowPos(x, y);
 }
 
+pub fn setNextWindowCollapsed(collapsed: bool) void {
+    c.zpk3ImGuiSetNextWindowCollapsed(collapsed);
+}
+
 pub fn beginWindow(title: [:0]const u8, open: ?*bool) bool {
     return c.zpk3ImGuiBeginWindow(title.ptr, if (open) |value| value else null);
 }

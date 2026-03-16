@@ -37,6 +37,10 @@ void zpk3ImGuiSetNextWindowPos(float x, float y) {
     ImGui::SetNextWindowPos(ImVec2(x, y), ImGuiCond_FirstUseEver);
 }
 
+void zpk3ImGuiSetNextWindowCollapsed(bool collapsed) {
+    ImGui::SetNextWindowCollapsed(collapsed, ImGuiCond_FirstUseEver);
+}
+
 bool zpk3ImGuiBeginWindow(const char *title, bool *open) {
     return ImGui::Begin(title, open);
 }
