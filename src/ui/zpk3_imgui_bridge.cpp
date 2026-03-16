@@ -33,6 +33,10 @@ void zpk3ImGuiSetNextWindowSize(float width, float height) {
     ImGui::SetNextWindowSize(ImVec2(width, height), ImGuiCond_FirstUseEver);
 }
 
+void zpk3ImGuiSetNextWindowPos(float x, float y) {
+    ImGui::SetNextWindowPos(ImVec2(x, y), ImGuiCond_FirstUseEver);
+}
+
 bool zpk3ImGuiBeginWindow(const char *title, bool *open) {
     return ImGui::Begin(title, open);
 }

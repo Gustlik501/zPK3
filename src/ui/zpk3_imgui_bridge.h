@@ -15,6 +15,7 @@ bool zpk3ImGuiWantCaptureMouse(void);
 bool zpk3ImGuiWantCaptureKeyboard(void);
 
 void zpk3ImGuiSetNextWindowSize(float width, float height);
+void zpk3ImGuiSetNextWindowPos(float x, float y);
 bool zpk3ImGuiBeginWindow(const char *title, bool *open);
 void zpk3ImGuiEndWindow(void);
 

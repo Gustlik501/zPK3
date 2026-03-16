@@ -407,7 +407,7 @@ fn drawOverlay(
 }
 
 const InspectorState = struct {
-    visible: bool = true,
+    visible: bool = false,
     stats_visible: bool = true,
     capture_mouse: bool = false,
     capture_keyboard: bool = false,
@@ -437,6 +437,9 @@ fn drawInspector(
     inspector: *InspectorState,
     profiler: *const FrameProfiler,
 ) void {
+    const window_width: f32 = 430.0;
+    const margin: f32 = 16.0;
+    imgui.setNextWindowPos(@as(f32, @floatFromInt(rl.getScreenWidth())) - window_width - margin, margin);
     imgui.setNextWindowSize(430.0, 620.0);
     const open = imgui.beginWindow("Scene Inspector", &inspector.visible);
     defer imgui.endWindow();
@@ -1162,7 +1165,7 @@ const CollisionTraceSnapshot = struct {
 };
 
 const CollisionDebugState = struct {
-    draw_debug: bool = true,
+    draw_debug: bool = false,
     use_box_trace: bool = true,
     trace_mode: CollisionTraceMode = .selection,
     trace_length_index: usize = 2,
