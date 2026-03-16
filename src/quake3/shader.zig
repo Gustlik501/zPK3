@@ -34,6 +34,12 @@ pub const AlphaGen = enum {
     constant,
 };
 
+pub const BillboardMode = enum {
+    none,
+    auto_sprite,
+    auto_sprite2,
+};
+
 pub const Stage = struct {
     map_kind: MapKind = .map,
     blend_mode: BlendMode = .solid,
@@ -77,6 +83,7 @@ pub const Stage = struct {
 pub const Definition = struct {
     editor_image: ?[]const u8 = null,
     cull_mode: CullMode = .back,
+    billboard_mode: BillboardMode = .none,
     surfaceparm_nolightmap: bool = false,
     surfaceparm_fog: bool = false,
     surfaceparm_sky: bool = false,
@@ -284,6 +291,16 @@ fn applyDefinitionKeyword(allocator: std.mem.Allocator, definition: *Definition,
             definition.cull_mode = .front;
         } else {
             definition.cull_mode = .back;
+        }
+        return;
+    }
+
+    if (std.mem.eql(u8, keyword, "deformvertexes") or std.mem.eql(u8, keyword, "deformVertexes")) {
+        const mode = tokens.next() orelse return;
+        if (std.mem.eql(u8, mode, "autosprite") or std.mem.eql(u8, mode, "autoSprite")) {
+            definition.billboard_mode = .auto_sprite;
+        } else if (std.mem.eql(u8, mode, "autosprite2") or std.mem.eql(u8, mode, "autoSprite2")) {
+            definition.billboard_mode = .auto_sprite2;
         }
     }
 }
@@ -531,4 +548,28 @@ test "parse shader stage color alpha and tcmod" {
     try std.testing.expectEqual(@as(f32, 0.5), definition.stages[0].const_color[3]);
     try std.testing.expectEqual(@as(f32, 0.25), definition.stages[0].tcmod_scroll[0]);
     try std.testing.expectEqual(@as(f32, -0.5), definition.stages[0].tcmod_scroll[1]);
+}
+
+test "parse shader deform autosprite mode" {
+    const source =
+        \\textures/test/flame
+        \\{
+        \\    deformVertexes autoSprite2
+        \\    {
+        \\        map textures/test/flame01.tga
+        \\        blendfunc add
+        \\    }
+        \\}
+    ;
+
+    var library = Library{
+        .allocator = std.testing.allocator,
+        .definitions = std.StringHashMap(Definition).init(std.testing.allocator),
+    };
+    defer library.deinit();
+
+    try library.parseFile(source);
+
+    const definition = library.get("textures/test/flame") orelse return error.TestExpectedEqual;
+    try std.testing.expect(definition.billboard_mode == .auto_sprite2);
 }

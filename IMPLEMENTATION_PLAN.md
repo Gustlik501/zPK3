@@ -75,9 +75,9 @@ This file is a working checklist for turning this repo into a PK3/BSP-native run
 - [x] `tcMod`
 - [x] `cull`
 - [x] `surfaceparm`
-- [ ] sky
-- [ ] fog
-- [ ] autosprite or equivalent billboard handling
+- [x] sky
+- [x] fog
+- [x] autosprite or equivalent billboard handling
 - [x] Wire time-based stage evaluation into rendering so animated materials work.
 
 ## Phase 7: Model Support
@@ -101,7 +101,7 @@ This file is a working checklist for turning this repo into a PK3/BSP-native run
 - [ ] Change the renderer to consume scene/material runtime data.
 - [ ] Preserve static lightmap rendering.
 - [ ] Add material stage execution for alpha/additive/animated surfaces.
-- [ ] Add sky/fog/billboard rendering paths.
+- [x] Add sky/fog/billboard rendering paths.
 - [ ] Add model rendering for MD3 and BSP submodels.
 
 ## Phase 10: Tooling Base

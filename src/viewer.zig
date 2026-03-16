@@ -753,12 +753,13 @@ fn drawRuntimeStatsWindow(
 
     const scene_line = std.fmt.bufPrintZ(
         &line_buf,
-        "Scene models: {d}  BSP submodels: {d}  World batches: {d}  Submodel batches: {d}  Animated batches: {d}",
+        "Scene models: {d}  BSP submodels: {d}  World batches: {d}  Submodel batches: {d}  Billboards: {d}  Animated batches: {d}",
         .{
             renderer.stats.model_instance_count,
             renderer.stats.bsp_submodel_instance_count,
             renderer.stats.world_batch_count,
             renderer.stats.submodel_batch_count,
+            renderer.stats.billboard_count,
             renderer.stats.animated_batch_count,
         },
     ) catch return;
@@ -953,12 +954,13 @@ fn dumpStatsReport(
         },
     );
     std.debug.print(
-        "scene: models={d} bsp_submodels={d} world_batches={d} submodel_batches={d} animated_batches={d}\n",
+        "scene: models={d} bsp_submodels={d} world_batches={d} submodel_batches={d} billboards={d} animated_batches={d}\n",
         .{
             renderer.stats.model_instance_count,
             renderer.stats.bsp_submodel_instance_count,
             renderer.stats.world_batch_count,
             renderer.stats.submodel_batch_count,
+            renderer.stats.billboard_count,
             renderer.stats.animated_batch_count,
         },
     );

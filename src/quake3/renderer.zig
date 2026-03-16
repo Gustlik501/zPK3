@@ -66,6 +66,7 @@ const lightmap_shader_fs: [:0]const u8 =
 
 pub const SceneStats = qscene.SceneStats;
 const RenderMode = qscene.RenderMode;
+const BillboardMode = qscene.BillboardMode;
 const MaterialRule = qscene.MaterialRule;
 
 const SurfaceBatch = struct {
@@ -78,6 +79,20 @@ const SurfaceBatch = struct {
     alpha_cutoff: f32,
     visible_clusters: []u8,
     bounds: rl.BoundingBox,
+};
+
+const SurfaceBillboard = struct {
+    binding: MaterialBinding,
+    owner_bsp_model_index: usize,
+    render_mode: RenderMode,
+    alpha_cutoff: f32,
+    billboard_mode: BillboardMode,
+    visible_clusters: []u8,
+    bounds: rl.BoundingBox,
+    center: rl.Vector3,
+    size: rl.Vector2,
+    up_axis: rl.Vector3,
+    color: [4]u8,
 };
 
 const Plane = struct {
@@ -231,6 +246,7 @@ pub const SceneObject = struct {
 pub const SceneRenderer = struct {
     allocator: std.mem.Allocator,
     batches: []SurfaceBatch,
+    billboards: []SurfaceBillboard,
     scene_objects: []SceneObject,
     stats: SceneStats,
     map: *const bsp.Map,
@@ -281,6 +297,15 @@ pub const SceneRenderer = struct {
                 allocator.free(batch.visible_clusters);
             }
             batch_list.deinit(allocator);
+        }
+
+        var billboard_list: std.ArrayList(SurfaceBillboard) = .empty;
+        errdefer {
+            for (billboard_list.items) |*billboard| {
+                billboard.binding.deinit(allocator);
+                allocator.free(billboard.visible_clusters);
+            }
+            billboard_list.deinit(allocator);
         }
 
         const scene_objects = try buildSceneObjects(allocator, map, extracted_scene.model_instances);
@@ -334,6 +359,44 @@ pub const SceneRenderer = struct {
             });
         }
 
+        for (extracted_scene.billboards) |*billboard| {
+            const binding = try texture_cache.buildMaterialBinding(billboard.texture_name);
+            errdefer {
+                var owned_binding = binding;
+                owned_binding.deinit(allocator);
+            }
+
+            if (texture_cache.was_missing_last_load) {
+                stats.missing_texture_count += 1;
+            }
+            if (binding.mode != .static) {
+                stats.animated_batch_count += 1;
+            }
+
+            stats.geometry_memory_bytes += billboardMemoryBytes(billboard);
+            stats.visibility_memory_bytes += billboard.visible_clusters.len;
+            stats.material_memory_bytes += bindingMemoryBytes(binding);
+            const visible_clusters = try allocator.dupe(u8, billboard.visible_clusters);
+            errdefer allocator.free(visible_clusters);
+
+            try billboard_list.append(allocator, .{
+                .binding = binding,
+                .owner_bsp_model_index = billboard.owner_bsp_model_index,
+                .render_mode = billboard.render_mode,
+                .alpha_cutoff = billboard.alpha_cutoff,
+                .billboard_mode = billboard.billboard_mode,
+                .visible_clusters = visible_clusters,
+                .bounds = .{
+                    .min = toRlVector3(billboard.bounds_min),
+                    .max = toRlVector3(billboard.bounds_max),
+                },
+                .center = toRlVector3(billboard.center),
+                .size = .{ .x = billboard.size[0], .y = billboard.size[1] },
+                .up_axis = toRlVector3(billboard.up_axis),
+                .color = billboard.color,
+            });
+        }
+
         stats.loaded_texture_count = texture_cache.loadedTextureCount();
         stats.texture_memory_bytes = texture_cache.loadedTextureMemoryBytes();
         stats.lightmap_texture_count = lightmap_cache.textureCount();
@@ -342,6 +405,7 @@ pub const SceneRenderer = struct {
         return .{
             .allocator = allocator,
             .batches = try batch_list.toOwnedSlice(allocator),
+            .billboards = try billboard_list.toOwnedSlice(allocator),
             .scene_objects = scene_objects,
             .stats = stats,
             .map = map,
@@ -365,6 +429,11 @@ pub const SceneRenderer = struct {
             self.allocator.free(batch.visible_clusters);
         }
         self.allocator.free(self.batches);
+        for (self.billboards) |*billboard| {
+            billboard.binding.deinit(self.allocator);
+            self.allocator.free(billboard.visible_clusters);
+        }
+        self.allocator.free(self.billboards);
         for (self.scene_objects) |*object| object.deinit(self.allocator);
         self.allocator.free(self.scene_objects);
         self.texture_cache.deinit();
@@ -409,8 +478,11 @@ pub const SceneRenderer = struct {
         self.last_camera_frustum = CameraFrustum.fromCamera(camera);
 
         self.drawBatches(.solid);
+        self.drawBillboards(.solid, camera);
         self.drawBatches(.alpha);
+        self.drawBillboards(.alpha, camera);
         self.drawBatches(.additive);
+        self.drawBillboards(.additive, camera);
         if (self.draw_scene_objects) self.drawSceneObjects();
         rlgl.rlEnableBackfaceCulling();
     }
@@ -600,6 +672,56 @@ pub const SceneRenderer = struct {
         }
     }
 
+    fn drawBillboards(self: *SceneRenderer, mode: RenderMode, camera: rl.Camera) void {
+        switch (mode) {
+            .solid => {},
+            .alpha => rl.beginBlendMode(.alpha),
+            .additive => rl.beginBlendMode(.additive),
+        }
+        defer switch (mode) {
+            .solid => {},
+            .alpha, .additive => rl.endBlendMode(),
+        };
+
+        const time_seconds = rl.getTime();
+        for (self.billboards) |*billboard| {
+            if (billboard.render_mode != mode) continue;
+            if (billboard.owner_bsp_model_index == 0 and !self.draw_world_geometry) continue;
+            if (billboard.owner_bsp_model_index != 0 and !self.draw_submodel_geometry) continue;
+            if (!self.isBillboardVisible(billboard)) continue;
+            if (self.isolate_selected_submodel) {
+                if (self.selectedBspModelIndex()) |model_index| {
+                    if (billboard.owner_bsp_model_index != model_index) continue;
+                }
+            }
+
+            if (self.draw_wireframe) {
+                rl.drawBoundingBox(billboard.bounds, .{ .r = 96, .g = 255, .b = 128, .a = 255 });
+            } else {
+                const texture = billboard.binding.currentTexture(time_seconds);
+                const source = billboardSourceRect(texture);
+                const tint = resolveBillboardTint(billboard, texture);
+                switch (billboard.billboard_mode) {
+                    .none, .auto_sprite => rl.drawBillboardRec(camera, texture, source, billboard.center, billboard.size, tint),
+                    .auto_sprite2 => rl.drawBillboardPro(
+                        camera,
+                        texture,
+                        source,
+                        billboard.center,
+                        normalizeRlVector3(billboard.up_axis),
+                        billboard.size,
+                        .{ .x = billboard.size.x * 0.5, .y = billboard.size.y * 0.5 },
+                        0.0,
+                        tint,
+                    ),
+                }
+            }
+
+            self.stats.drawn_batch_count += 1;
+            self.stats.drawn_vertex_count += 6;
+        }
+    }
+
     fn drawSceneObjects(self: *SceneRenderer) void {
         const selected_index = self.selected_scene_object_index;
         for (self.scene_objects, 0..) |object, object_index| {
@@ -643,6 +765,39 @@ pub const SceneRenderer = struct {
     fn selectedBspModelIndex(self: *const SceneRenderer) ?usize {
         const object = self.selectedSceneObject() orelse return null;
         return object.bsp_model_index;
+    }
+
+    fn isBillboardVisible(self: *const SceneRenderer, billboard: *const SurfaceBillboard) bool {
+        if (billboard.owner_bsp_model_index != 0) return true;
+        if (self.visibility_culling and self.map.visdata != null and billboard.visible_clusters.len != 0) {
+            const camera_cluster = self.last_camera_cluster;
+            if (camera_cluster >= 0) {
+                const camera_cluster_index: usize = @intCast(camera_cluster);
+                if (camera_cluster_index / 8 < billboard.visible_clusters.len) {
+                    const mask: u8 = @as(u8, 1) << @intCast(camera_cluster_index & 7);
+                    if ((billboard.visible_clusters[camera_cluster_index / 8] & mask) != 0) {
+                        return !self.frustum_culling or self.last_camera_frustum.containsBox(billboard.bounds);
+                    }
+                }
+
+                for (billboard.visible_clusters, 0..) |byte, byte_index| {
+                    if (byte == 0) continue;
+                    var bit: usize = 0;
+                    while (bit < 8) : (bit += 1) {
+                        const mask: u8 = @as(u8, 1) << @intCast(bit);
+                        if ((byte & mask) == 0) continue;
+
+                        const cluster_index = byte_index * 8 + bit;
+                        if (!self.map.isClusterVisible(camera_cluster, @intCast(cluster_index))) continue;
+                        return !self.frustum_culling or self.last_camera_frustum.containsBox(billboard.bounds);
+                    }
+                }
+
+                return false;
+            }
+        }
+
+        return !self.frustum_culling or self.last_camera_frustum.containsBox(billboard.bounds);
     }
 };
 
@@ -907,6 +1062,11 @@ const TextureCache = struct {
     pub fn getMaterialRule(self: *const TextureCache, texture_name: []const u8) MaterialRule {
         var rule = MaterialRule{};
         if (self.shaders.get(texture_name)) |definition| {
+            rule.billboard_mode = switch (definition.billboard_mode) {
+                .none => .none,
+                .auto_sprite => .auto_sprite,
+                .auto_sprite2 => .auto_sprite2,
+            };
             if (definition.surfaceparm_nolightmap) {
                 rule.use_lightmap = false;
             }
@@ -927,6 +1087,11 @@ const TextureCache = struct {
             }
             if (definition.cull_mode == .none) {
                 rule.double_sided = true;
+            }
+            if (rule.billboard_mode != .none) {
+                rule.use_lightmap = false;
+                rule.double_sided = true;
+                if (rule.render_mode == .solid) rule.render_mode = .alpha;
             }
 
             for (definition.stages) |stage| {
@@ -1561,8 +1726,44 @@ fn batchMemoryBytes(batch: *const qscene.SurfaceBatch) usize {
         batch.texture_name.len;
 }
 
+fn billboardMemoryBytes(billboard: *const qscene.BillboardSprite) usize {
+    return @sizeOf(qscene.BillboardSprite) + billboard.texture_name.len + billboard.visible_clusters.len;
+}
+
 fn bindingMemoryBytes(binding: MaterialBinding) usize {
     return binding.animated_frames.len * @sizeOf(rl.Texture2D);
+}
+
+fn billboardSourceRect(texture: rl.Texture2D) rl.Rectangle {
+    return .{
+        .x = 0.0,
+        .y = 0.0,
+        .width = @floatFromInt(texture.width),
+        .height = @floatFromInt(texture.height),
+    };
+}
+
+fn resolveBillboardTint(billboard: *const SurfaceBillboard, texture: rl.Texture2D) rl.Color {
+    _ = texture;
+    var color = billboard.binding.material_color;
+    if (billboard.binding.use_vertex_rgb) {
+        color[0] *= @as(f32, @floatFromInt(billboard.color[0])) / 255.0;
+        color[1] *= @as(f32, @floatFromInt(billboard.color[1])) / 255.0;
+        color[2] *= @as(f32, @floatFromInt(billboard.color[2])) / 255.0;
+    }
+    if (billboard.binding.use_vertex_alpha) {
+        color[3] *= @as(f32, @floatFromInt(billboard.color[3])) / 255.0;
+    }
+    return .{
+        .r = floatColorToByte(color[0]),
+        .g = floatColorToByte(color[1]),
+        .b = floatColorToByte(color[2]),
+        .a = floatColorToByte(color[3]),
+    };
+}
+
+fn floatColorToByte(value: f32) u8 {
+    return @intFromFloat(@max(0.0, @min(255.0, value * 255.0)));
 }
 
 fn discardCpuMeshData(model: *rl.Model) usize {
@@ -1652,6 +1853,17 @@ fn isShiftDown() bool {
 
 fn toRlVector3(v: qmath.Vec3) rl.Vector3 {
     return .{ .x = v.x, .y = v.y, .z = v.z };
+}
+
+fn normalizeRlVector3(v: rl.Vector3) rl.Vector3 {
+    const length_sq = v.x * v.x + v.y * v.y + v.z * v.z;
+    if (length_sq <= 0.000001) return .{ .x = 0.0, .y = 1.0, .z = 0.0 };
+    const inverse_length = 1.0 / @sqrt(length_sq);
+    return .{
+        .x = v.x * inverse_length,
+        .y = v.y * inverse_length,
+        .z = v.z * inverse_length,
+    };
 }
 
 fn toBoundingBox(model: bsp.Model) rl.BoundingBox {

@@ -5,6 +5,7 @@ const qmath = @import("math.zig");
 
 pub const SceneStats = struct {
     batch_count: usize = 0,
+    billboard_count: usize = 0,
     face_count: usize = 0,
     vertex_count: usize = 0,
     missing_texture_count: usize = 0,
@@ -35,12 +36,19 @@ pub const RenderMode = enum {
     additive,
 };
 
+pub const BillboardMode = enum {
+    none,
+    auto_sprite,
+    auto_sprite2,
+};
+
 pub const MaterialRule = struct {
     skip: bool = false,
     use_lightmap: bool = true,
     render_mode: RenderMode = .solid,
     double_sided: bool = false,
     alpha_cutoff: f32 = 0.0,
+    billboard_mode: BillboardMode = .none,
 };
 
 pub const SurfaceBatch = struct {
@@ -73,6 +81,27 @@ pub const SurfaceBatch = struct {
     }
 };
 
+pub const BillboardSprite = struct {
+    owner_bsp_model_index: usize,
+    texture_name: []const u8,
+    render_mode: RenderMode,
+    alpha_cutoff: f32,
+    billboard_mode: BillboardMode,
+    visible_clusters: []u8,
+    bounds_min: qmath.Vec3,
+    bounds_max: qmath.Vec3,
+    center: qmath.Vec3,
+    size: [2]f32,
+    up_axis: qmath.Vec3,
+    color: [4]u8,
+
+    pub fn deinit(self: *BillboardSprite, allocator: std.mem.Allocator) void {
+        allocator.free(self.texture_name);
+        allocator.free(self.visible_clusters);
+        self.* = undefined;
+    }
+};
+
 pub const ModelInstanceKind = enum {
     bsp_submodel,
     external_model,
@@ -99,6 +128,7 @@ pub const ModelInstance = struct {
 pub const Scene = struct {
     allocator: std.mem.Allocator,
     batches: []SurfaceBatch,
+    billboards: []BillboardSprite,
     model_instances: []ModelInstance,
     stats: SceneStats,
 
@@ -115,12 +145,34 @@ pub const Scene = struct {
         defer face_cluster_info.deinit(allocator);
 
         var stats: SceneStats = .{};
+        var billboard_list: std.ArrayList(BillboardSprite) = .empty;
+        errdefer {
+            for (billboard_list.items) |*billboard| billboard.deinit(allocator);
+            billboard_list.deinit(allocator);
+        }
 
         for (map.faces, 0..) |face, face_index| {
             if (face.texture < 0 or @as(usize, @intCast(face.texture)) >= map.textures.len) continue;
             const texture_name = map.textures[@intCast(face.texture)].name;
             const rule = material_provider.getMaterialRule(texture_name);
             if (rule.skip or shouldSkipTexture(texture_name)) continue;
+
+            if (rule.billboard_mode != .none) {
+                if (try buildBillboardSprite(
+                    allocator,
+                    map,
+                    face,
+                    face_owner_models[face_index],
+                    texture_name,
+                    rule,
+                    face_cluster_info,
+                    face_index,
+                )) |billboard| {
+                    try billboard_list.append(allocator, billboard);
+                    stats.face_count += 1;
+                }
+                continue;
+            }
 
             const builder = try getOrCreateBuilder(allocator, &builders, .{
                 .owner_bsp_model_index = face_owner_models[face_index],
@@ -163,7 +215,8 @@ pub const Scene = struct {
             }
         }
 
-        stats.batch_count = batch_list.items.len;
+        stats.billboard_count = billboard_list.items.len;
+        stats.batch_count = batch_list.items.len + billboard_list.items.len;
         stats.model_instance_count = model_instances.items.len;
         for (model_instances.items) |instance| {
             if (instance.kind == .bsp_submodel) stats.bsp_submodel_instance_count += 1;
@@ -172,6 +225,7 @@ pub const Scene = struct {
         return .{
             .allocator = allocator,
             .batches = try batch_list.toOwnedSlice(allocator),
+            .billboards = try billboard_list.toOwnedSlice(allocator),
             .model_instances = try model_instances.toOwnedSlice(allocator),
             .stats = stats,
         };
@@ -180,6 +234,8 @@ pub const Scene = struct {
     pub fn deinit(self: *Scene) void {
         for (self.batches) |*batch| batch.deinit(self.allocator);
         self.allocator.free(self.batches);
+        for (self.billboards) |*billboard| billboard.deinit(self.allocator);
+        self.allocator.free(self.billboards);
         for (self.model_instances) |*instance| instance.deinit(self.allocator);
         self.allocator.free(self.model_instances);
         self.* = undefined;
@@ -207,6 +263,7 @@ fn getOrCreateBuilder(
             builder.rule.use_lightmap == key.rule.use_lightmap and
             builder.rule.double_sided == key.rule.double_sided and
             builder.rule.alpha_cutoff == key.rule.alpha_cutoff and
+            builder.rule.billboard_mode == key.rule.billboard_mode and
             builder.visible_clusters.len == key.cluster_vector_bytes)
         {
             return builder;
@@ -537,6 +594,11 @@ const SampledVertex = struct {
     color: [4]u8,
 };
 
+const FacePoint = struct {
+    position: qmath.Vec3,
+    color: [4]u8,
+};
+
 const FaceClusterInfo = struct {
     bytes_per_face: usize,
     face_count: usize,
@@ -592,6 +654,170 @@ fn collectFaceClusterInfo(allocator: std.mem.Allocator, map: *const bsp.Map) !Fa
         .face_count = map.faces.len,
         .bytes = bytes,
     };
+}
+
+fn buildBillboardSprite(
+    allocator: std.mem.Allocator,
+    map: *const bsp.Map,
+    face: bsp.Face,
+    owner_bsp_model_index: usize,
+    texture_name: []const u8,
+    rule: MaterialRule,
+    face_cluster_info: FaceClusterInfo,
+    face_index: usize,
+) !?BillboardSprite {
+    var points: std.ArrayList(FacePoint) = .empty;
+    defer points.deinit(allocator);
+
+    try collectFacePoints(allocator, &points, map, face);
+    if (points.items.len < 3) return null;
+
+    var center: qmath.Vec3 = .{ .x = 0.0, .y = 0.0, .z = 0.0 };
+    var color_accum = [4]u32{ 0, 0, 0, 0 };
+    for (points.items) |point| {
+        center.x += point.position.x;
+        center.y += point.position.y;
+        center.z += point.position.z;
+        color_accum[0] += point.color[0];
+        color_accum[1] += point.color[1];
+        color_accum[2] += point.color[2];
+        color_accum[3] += point.color[3];
+    }
+
+    const count_f: f32 = @floatFromInt(points.items.len);
+    center.x /= count_f;
+    center.y /= count_f;
+    center.z /= count_f;
+
+    var major_axis = qmath.Vec3{ .x = 1.0, .y = 0.0, .z = 0.0 };
+    var max_distance_sq: f32 = 0.0;
+    for (points.items, 0..) |point_a, a_index| {
+        for (points.items[a_index + 1 ..]) |point_b| {
+            const delta = subtractVec3(point_b.position, point_a.position);
+            const distance_sq = dotVec3(delta, delta);
+            if (distance_sq > max_distance_sq) {
+                max_distance_sq = distance_sq;
+                major_axis = normalizeBillboardVec(delta);
+            }
+        }
+    }
+    if (max_distance_sq <= 0.0001) return null;
+
+    var minor_axis = qmath.Vec3{ .x = 0.0, .y = 1.0, .z = 0.0 };
+    var half_major: f32 = 0.0;
+    var half_minor: f32 = 0.0;
+    for (points.items) |point| {
+        const relative = subtractVec3(point.position, center);
+        const major_projection = dotVec3(relative, major_axis);
+        half_major = @max(half_major, @abs(major_projection));
+
+        const major_component = scaleVec3(major_axis, major_projection);
+        const perpendicular = subtractVec3(relative, major_component);
+        const perpendicular_length = lengthVec3(perpendicular);
+        if (perpendicular_length > half_minor) {
+            half_minor = perpendicular_length;
+            minor_axis = normalizeBillboardVec(perpendicular);
+        }
+    }
+
+    if (half_minor <= 0.001) half_minor = half_major;
+    if (half_major <= 0.001) half_major = half_minor;
+    if (half_major <= 0.001 or half_minor <= 0.001) return null;
+
+    var size = [2]f32{ half_major * 2.0, half_minor * 2.0 };
+    var up_axis = qmath.Vec3{ .x = 0.0, .y = 1.0, .z = 0.0 };
+    if (rule.billboard_mode == .auto_sprite2) {
+        if (half_major >= half_minor) {
+            size = .{ half_minor * 2.0, half_major * 2.0 };
+            up_axis = major_axis;
+        } else {
+            size = .{ half_major * 2.0, half_minor * 2.0 };
+            up_axis = minor_axis;
+        }
+    }
+
+    const radius = @max(half_major, half_minor);
+    const point_count_u32: u32 = @intCast(points.items.len);
+    const average_color: [4]u8 = .{
+        @intCast(color_accum[0] / point_count_u32),
+        @intCast(color_accum[1] / point_count_u32),
+        @intCast(color_accum[2] / point_count_u32),
+        @intCast(color_accum[3] / point_count_u32),
+    };
+
+    return .{
+        .owner_bsp_model_index = owner_bsp_model_index,
+        .texture_name = try allocator.dupe(u8, texture_name),
+        .render_mode = rule.render_mode,
+        .alpha_cutoff = rule.alpha_cutoff,
+        .billboard_mode = rule.billboard_mode,
+        .visible_clusters = try dupeFaceClusters(allocator, face_cluster_info, face_index),
+        .bounds_min = .{
+            .x = center.x - radius,
+            .y = center.y - radius,
+            .z = center.z - radius,
+        },
+        .bounds_max = .{
+            .x = center.x + radius,
+            .y = center.y + radius,
+            .z = center.z + radius,
+        },
+        .center = center,
+        .size = size,
+        .up_axis = up_axis,
+        .color = average_color,
+    };
+}
+
+fn collectFacePoints(
+    allocator: std.mem.Allocator,
+    points: *std.ArrayList(FacePoint),
+    map: *const bsp.Map,
+    face: bsp.Face,
+) !void {
+    if (face.vertex_index < 0 or face.vertex_count <= 0) return;
+    const base_vertex: usize = @intCast(face.vertex_index);
+    const vertex_count: usize = @intCast(face.vertex_count);
+    if (base_vertex + vertex_count > map.vertices.len) return;
+
+    const vertices = map.vertices[base_vertex .. base_vertex + vertex_count];
+    try points.ensureUnusedCapacity(allocator, vertices.len);
+    for (vertices) |vertex| {
+        points.appendAssumeCapacity(.{
+            .position = bsp.toEngineSpace(vertex.position),
+            .color = vertex.color,
+        });
+    }
+}
+
+fn dupeFaceClusters(allocator: std.mem.Allocator, info: FaceClusterInfo, face_index: usize) ![]u8 {
+    if (info.bytes_per_face == 0 or face_index >= info.face_count) {
+        return try allocator.alloc(u8, 0);
+    }
+    const start = face_index * info.bytes_per_face;
+    return allocator.dupe(u8, info.bytes[start .. start + info.bytes_per_face]);
+}
+
+fn subtractVec3(a: qmath.Vec3, b: qmath.Vec3) qmath.Vec3 {
+    return .{ .x = a.x - b.x, .y = a.y - b.y, .z = a.z - b.z };
+}
+
+fn scaleVec3(v: qmath.Vec3, scale: f32) qmath.Vec3 {
+    return .{ .x = v.x * scale, .y = v.y * scale, .z = v.z * scale };
+}
+
+fn dotVec3(a: qmath.Vec3, b: qmath.Vec3) f32 {
+    return a.x * b.x + a.y * b.y + a.z * b.z;
+}
+
+fn lengthVec3(v: qmath.Vec3) f32 {
+    return @sqrt(dotVec3(v, v));
+}
+
+fn normalizeBillboardVec(v: qmath.Vec3) qmath.Vec3 {
+    const length = lengthVec3(v);
+    if (length <= 0.0001) return .{ .x = 0.0, .y = 1.0, .z = 0.0 };
+    return scaleVec3(v, 1.0 / length);
 }
 
 fn samplePatch(control: [3][3]bsp.Vertex, u: f32, v: f32) SampledVertex {
