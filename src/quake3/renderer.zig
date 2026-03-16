@@ -692,11 +692,14 @@ const TextureCache = struct {
     image_paths: std.ArrayList([]const u8),
     fallback_index_built: bool = false,
     placeholder: rl.Texture2D,
+    white: rl.Texture2D,
     was_missing_last_load: bool = false,
 
     pub fn init(allocator: std.mem.Allocator, packs: *archive.Pk3Collection) !TextureCache {
         const image = rl.genImageChecked(64, 64, 8, 8, .magenta, .black);
         defer rl.unloadImage(image);
+        const white_image = rl.genImageColor(1, 1, .white);
+        defer rl.unloadImage(white_image);
 
         var shaders = try qshader.Library.init(allocator, packs);
         errdefer shaders.deinit();
@@ -713,6 +716,7 @@ const TextureCache = struct {
             .image_paths = .empty,
             .fallback_index_built = false,
             .placeholder = try rl.loadTextureFromImage(image),
+            .white = try rl.loadTextureFromImage(white_image),
         };
         errdefer cache.deinit();
         return cache;
@@ -758,15 +762,16 @@ const TextureCache = struct {
             self.allocator.free(entry.key_ptr.*);
         }
         self.fallback_ambiguous.deinit();
+        rl.unloadTexture(self.white);
         rl.unloadTexture(self.placeholder);
     }
 
     fn loadedTextureCount(self: *const TextureCache) usize {
-        return self.textures.count();
+        return self.textures.count() + 2;
     }
 
     fn loadedTextureMemoryBytes(self: *const TextureCache) usize {
-        var total: usize = 0;
+        var total: usize = textureMemoryBytesEstimate(self.placeholder) + textureMemoryBytesEstimate(self.white);
         var it = self.textures.iterator();
         while (it.next()) |entry| {
             total += textureMemoryBytesEstimate(entry.value_ptr.*);
@@ -825,9 +830,14 @@ const TextureCache = struct {
 
     pub fn buildMaterialBinding(self: *TextureCache, material_name: []const u8) !MaterialBinding {
         self.was_missing_last_load = false;
+        const definition = self.shaders.get(material_name);
+        const default_texture = if (definition) |value|
+            self.defaultTextureForDefinition(value)
+        else
+            self.placeholder;
 
-        if (self.shaders.get(material_name)) |definition| {
-            for (definition.stages) |stage| {
+        if (definition) |shader_definition| {
+            for (shader_definition.stages) |stage| {
                 switch (stage.map_kind) {
                     .animmap, .oneshotanimmap => {
                         if (stage.anim_frames.len == 0) continue;
@@ -836,12 +846,12 @@ const TextureCache = struct {
                         errdefer self.allocator.free(frames);
 
                         for (stage.anim_frames, 0..) |frame_name, frame_index| {
-                            const texture = try self.tryLoadResolvedTexture(frame_name) orelse self.placeholder;
+                            const texture = try self.tryLoadResolvedTexture(frame_name) orelse default_texture;
                             if (texture.id == self.placeholder.id) self.was_missing_last_load = true;
                             frames[frame_index] = texture;
                         }
 
-                        return .{
+                        var binding: MaterialBinding = .{
                             .mode = if (stage.map_kind == .oneshotanimmap) .animated_once else .animated_loop,
                             .static_texture = frames[0],
                             .animated_frames = frames,
@@ -851,12 +861,14 @@ const TextureCache = struct {
                             .use_vertex_rgb = stage.rgb_gen == .vertex,
                             .use_vertex_alpha = stage.alpha_gen == .vertex,
                         };
+                        self.applyDefinitionBindingTweaks(&binding, shader_definition);
+                        return binding;
                     },
                     .map, .clampmap => {
                         if (stage.texture) |texture_name| {
-                            const texture = try self.tryLoadResolvedTexture(texture_name) orelse self.placeholder;
+                            const texture = try self.tryLoadResolvedTexture(texture_name) orelse default_texture;
                             if (texture.id == self.placeholder.id) self.was_missing_last_load = true;
-                            return .{
+                            var binding: MaterialBinding = .{
                                 .mode = .static,
                                 .static_texture = texture,
                                 .uv_scroll = stage.tcmod_scroll,
@@ -864,19 +876,23 @@ const TextureCache = struct {
                                 .use_vertex_rgb = stage.rgb_gen == .vertex,
                                 .use_vertex_alpha = stage.alpha_gen == .vertex,
                             };
+                            self.applyDefinitionBindingTweaks(&binding, shader_definition);
+                            return binding;
                         }
                     },
                     .lightmap => {},
                 }
             }
 
-            if (definition.editor_image) |editor_image| {
-                const texture = try self.tryLoadResolvedTexture(editor_image) orelse self.placeholder;
+            if (shader_definition.editor_image) |editor_image| {
+                const texture = try self.tryLoadResolvedTexture(editor_image) orelse default_texture;
                 if (texture.id == self.placeholder.id) self.was_missing_last_load = true;
-                return .{
+                var binding: MaterialBinding = .{
                     .mode = .static,
                     .static_texture = texture,
                 };
+                self.applyDefinitionBindingTweaks(&binding, shader_definition);
+                return binding;
             }
         }
 
@@ -894,8 +910,17 @@ const TextureCache = struct {
             if (definition.surfaceparm_nolightmap) {
                 rule.use_lightmap = false;
             }
-            if (definition.surfaceparm_fog or definition.surfaceparm_sky or definition.surfaceparm_nodraw) {
+            if (definition.surfaceparm_nodraw) {
                 rule.skip = true;
+            }
+            if (definition.surfaceparm_sky) {
+                rule.use_lightmap = false;
+                rule.double_sided = true;
+            }
+            if (definition.surfaceparm_fog) {
+                rule.use_lightmap = false;
+                rule.double_sided = true;
+                if (rule.render_mode == .solid) rule.render_mode = .alpha;
             }
             if (definition.surfaceparm_trans and rule.render_mode == .solid) {
                 rule.render_mode = .alpha;
@@ -929,6 +954,22 @@ const TextureCache = struct {
             rule.double_sided = true;
         }
         return rule;
+    }
+
+    fn defaultTextureForDefinition(self: *const TextureCache, definition: *const qshader.Definition) rl.Texture2D {
+        if (definition.surfaceparm_fog or definition.surfaceparm_sky) return self.white;
+        return self.placeholder;
+    }
+
+    fn applyDefinitionBindingTweaks(
+        self: *const TextureCache,
+        binding: *MaterialBinding,
+        definition: *const qshader.Definition,
+    ) void {
+        _ = self;
+        if (definition.surfaceparm_fog and !binding.use_vertex_alpha and binding.material_color[3] >= 0.999) {
+            binding.material_color[3] = 0.35;
+        }
     }
 
     fn resolveMaterialTexture(self: *const TextureCache, material_name: []const u8, time_seconds: f64) ?[]const u8 {
