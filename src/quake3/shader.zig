@@ -40,12 +40,19 @@ pub const BillboardMode = enum {
     auto_sprite2,
 };
 
+pub const TcGen = enum {
+    base,
+    environment,
+};
+
 pub const Stage = struct {
     map_kind: MapKind = .map,
     blend_mode: BlendMode = .solid,
     alpha_cutout: bool = false,
     fps: f32 = 0.0,
+    tcgen: TcGen = .base,
     tcmod_scroll: [2]f32 = .{ 0.0, 0.0 },
+    tcmod_scale: [2]f32 = .{ 1.0, 1.0 },
     rgb_gen: ColorGen = .identity,
     alpha_gen: AlphaGen = .identity,
     const_color: [4]f32 = .{ 1.0, 1.0, 1.0, 1.0 },
@@ -414,10 +421,26 @@ fn consumeStageLine(allocator: std.mem.Allocator, stage: *Stage, line: []const u
 
     if (std.mem.eql(u8, keyword, "tcmod") or std.mem.eql(u8, keyword, "tcMod")) {
         const mode = tokens.next() orelse return false;
-        if (!std.mem.eql(u8, mode, "scroll")) return false;
-        stage.tcmod_scroll[0] = std.fmt.parseFloat(f32, tokens.next() orelse return false) catch return false;
-        stage.tcmod_scroll[1] = std.fmt.parseFloat(f32, tokens.next() orelse return false) catch return false;
-        return true;
+        if (std.mem.eql(u8, mode, "scroll")) {
+            stage.tcmod_scroll[0] = std.fmt.parseFloat(f32, tokens.next() orelse return false) catch return false;
+            stage.tcmod_scroll[1] = std.fmt.parseFloat(f32, tokens.next() orelse return false) catch return false;
+            return true;
+        }
+        if (std.mem.eql(u8, mode, "scale")) {
+            stage.tcmod_scale[0] = std.fmt.parseFloat(f32, tokens.next() orelse return false) catch return false;
+            stage.tcmod_scale[1] = std.fmt.parseFloat(f32, tokens.next() orelse return false) catch return false;
+            return true;
+        }
+        return false;
+    }
+
+    if (std.mem.eql(u8, keyword, "tcgen") or std.mem.eql(u8, keyword, "tcGen")) {
+        const mode = tokens.next() orelse return false;
+        if (std.mem.eql(u8, mode, "environment")) {
+            stage.tcgen = .environment;
+            return true;
+        }
+        return false;
     }
 
     return false;
@@ -536,6 +559,8 @@ test "parse shader stage color alpha and tcmod" {
         \\        rgbGen vertex
         \\        alphaGen const 0.5
         \\        tcMod scroll 0.25 -0.5
+        \\        tcMod scale 2 3
+        \\        tcGen environment
         \\    }
         \\}
     ;
@@ -555,6 +580,9 @@ test "parse shader stage color alpha and tcmod" {
     try std.testing.expectEqual(@as(f32, 0.5), definition.stages[0].const_color[3]);
     try std.testing.expectEqual(@as(f32, 0.25), definition.stages[0].tcmod_scroll[0]);
     try std.testing.expectEqual(@as(f32, -0.5), definition.stages[0].tcmod_scroll[1]);
+    try std.testing.expectEqual(@as(f32, 2.0), definition.stages[0].tcmod_scale[0]);
+    try std.testing.expectEqual(@as(f32, 3.0), definition.stages[0].tcmod_scale[1]);
+    try std.testing.expect(definition.stages[0].tcgen == .environment);
 }
 
 test "parse shader deform autosprite mode" {

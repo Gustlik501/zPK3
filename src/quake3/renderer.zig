@@ -23,9 +23,19 @@ const lightmap_shader_vs: [:0]const u8 =
     \\
     \\uniform mat4 mvp;
     \\uniform vec2 texOffset;
+    \\uniform vec2 texScale;
+    \\uniform int useEnvironmentTc;
+    \\uniform vec3 cameraPosition;
     \\
     \\void main() {
-    \\    fragTexCoord = vertexTexCoord + texOffset;
+    \\    vec2 stageTexCoord = vertexTexCoord;
+    \\    if (useEnvironmentTc == 1) {
+    \\        vec3 normal = normalize(vertexNormal);
+    \\        vec3 viewDir = normalize(cameraPosition - vertexPosition);
+    \\        vec3 reflected = reflect(-viewDir, normal);
+    \\        stageTexCoord = reflected.xy * 0.5 + 0.5;
+    \\    }
+    \\    fragTexCoord = stageTexCoord * texScale + texOffset;
     \\    fragTexCoord2 = vertexTexCoord2;
     \\    fragColor = vertexColor;
     \\    gl_Position = mvp * vec4(vertexPosition, 1.0);
@@ -183,9 +193,11 @@ const MaterialBinding = struct {
     animated_frames: []rl.Texture2D = &.{},
     fps: f32 = 0.0,
     uv_scroll: [2]f32 = .{ 0.0, 0.0 },
+    uv_scale: [2]f32 = .{ 1.0, 1.0 },
     material_color: [4]f32 = .{ 1.0, 1.0, 1.0, 1.0 },
     use_vertex_rgb: bool = false,
     use_vertex_alpha: bool = false,
+    use_environment_tc: bool = false,
 
     fn deinit(self: *MaterialBinding, allocator: std.mem.Allocator) void {
         allocator.free(self.animated_frames);
@@ -251,6 +263,9 @@ pub const SceneRenderer = struct {
     use_vertex_rgb_loc: i32,
     use_vertex_alpha_loc: i32,
     tex_offset_loc: i32,
+    tex_scale_loc: i32,
+    use_environment_tc_loc: i32,
+    camera_position_loc: i32,
     draw_wireframe: bool = false,
     fullbright: bool = false,
     backface_culling: bool = true,
@@ -410,6 +425,9 @@ pub const SceneRenderer = struct {
             .use_vertex_rgb_loc = rl.getShaderLocation(lightmap_shader, "useVertexRgb"),
             .use_vertex_alpha_loc = rl.getShaderLocation(lightmap_shader, "useVertexAlpha"),
             .tex_offset_loc = rl.getShaderLocation(lightmap_shader, "texOffset"),
+            .tex_scale_loc = rl.getShaderLocation(lightmap_shader, "texScale"),
+            .use_environment_tc_loc = rl.getShaderLocation(lightmap_shader, "useEnvironmentTc"),
+            .camera_position_loc = rl.getShaderLocation(lightmap_shader, "cameraPosition"),
         };
     }
 
@@ -468,13 +486,13 @@ pub const SceneRenderer = struct {
         self.updateVisibilityState(camera.position);
         self.last_camera_frustum = CameraFrustum.fromCamera(camera);
 
-        self.drawBatches(.solid);
+        self.drawBatches(.solid, camera);
         self.drawBillboards(.solid, camera);
-        self.drawBatches(.filter);
+        self.drawBatches(.filter, camera);
         self.drawBillboards(.filter, camera);
-        self.drawBatches(.alpha);
+        self.drawBatches(.alpha, camera);
         self.drawBillboards(.alpha, camera);
-        self.drawBatches(.additive);
+        self.drawBatches(.additive, camera);
         self.drawBillboards(.additive, camera);
         if (self.draw_scene_objects) self.drawSceneObjects();
         rlgl.rlEnableBackfaceCulling();
@@ -610,7 +628,7 @@ pub const SceneRenderer = struct {
         return self.last_camera_frustum.containsBox(batch.bounds);
     }
 
-    fn drawBatches(self: *SceneRenderer, mode: RenderMode) void {
+    fn drawBatches(self: *SceneRenderer, mode: RenderMode, camera: rl.Camera) void {
         switch (mode) {
             .solid => {},
             .filter => rl.beginBlendMode(.multiplied),
@@ -645,9 +663,14 @@ pub const SceneRenderer = struct {
             rl.setShaderValue(self.lightmap_shader, self.material_color_loc, &batch.binding.material_color, .vec4);
             const use_vertex_rgb: i32 = if (batch.binding.use_vertex_rgb) 1 else 0;
             const use_vertex_alpha: i32 = if (batch.binding.use_vertex_alpha) 1 else 0;
+            const use_environment_tc: i32 = if (batch.binding.use_environment_tc) 1 else 0;
             rl.setShaderValue(self.lightmap_shader, self.use_vertex_rgb_loc, &use_vertex_rgb, .int);
             rl.setShaderValue(self.lightmap_shader, self.use_vertex_alpha_loc, &use_vertex_alpha, .int);
             const tex_offset = batch.binding.currentUvOffset(time_seconds);
+            rl.setShaderValue(self.lightmap_shader, self.tex_scale_loc, &batch.binding.uv_scale, .vec2);
+            rl.setShaderValue(self.lightmap_shader, self.use_environment_tc_loc, &use_environment_tc, .int);
+            const camera_position = [3]f32{ camera.position.x, camera.position.y, camera.position.z };
+            rl.setShaderValue(self.lightmap_shader, self.camera_position_loc, &camera_position, .vec3);
             rl.setShaderValue(self.lightmap_shader, self.tex_offset_loc, &tex_offset, .vec2);
 
             const texture = batch.binding.currentTexture(time_seconds);
@@ -987,9 +1010,11 @@ const TextureCache = struct {
                             .animated_frames = frames,
                             .fps = stage.fps,
                             .uv_scroll = stage.tcmod_scroll,
+                            .uv_scale = stage.tcmod_scale,
                             .material_color = stage.const_color,
                             .use_vertex_rgb = stage.rgb_gen == .vertex,
                             .use_vertex_alpha = stage.alpha_gen == .vertex,
+                            .use_environment_tc = stage.tcgen == .environment,
                         };
                         self.applyDefinitionBindingTweaks(&binding, shader_definition);
                         return binding;
@@ -1002,9 +1027,11 @@ const TextureCache = struct {
                                 .mode = .static,
                                 .static_texture = texture,
                                 .uv_scroll = stage.tcmod_scroll,
+                                .uv_scale = stage.tcmod_scale,
                                 .material_color = stage.const_color,
                                 .use_vertex_rgb = stage.rgb_gen == .vertex,
                                 .use_vertex_alpha = stage.alpha_gen == .vertex,
+                                .use_environment_tc = stage.tcgen == .environment,
                             };
                             self.applyDefinitionBindingTweaks(&binding, shader_definition);
                             return binding;
