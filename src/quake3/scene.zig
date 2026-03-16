@@ -522,7 +522,8 @@ const MeshBuilder = struct {
 
         try self.positions.appendSlice(self.allocator, &.{ position.x, position.y, position.z });
         try self.texcoords.appendSlice(self.allocator, &.{ vertex.texcoord[0], 1.0 - vertex.texcoord[1] });
-        try self.texcoords2.appendSlice(self.allocator, &.{ vertex.lightmap_uv[0], 1.0 - vertex.lightmap_uv[1] });
+        // BSP lightmap UVs already match the baked lightmap orientation.
+        try self.texcoords2.appendSlice(self.allocator, &.{ vertex.lightmap_uv[0], vertex.lightmap_uv[1] });
         try self.normals.appendSlice(self.allocator, &.{ normal.x, normal.y, normal.z });
         try self.colors.appendSlice(self.allocator, &.{ vertex.color[0], vertex.color[1], vertex.color[2], vertex.color[3] });
         self.vertex_count += 1;
