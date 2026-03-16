@@ -22,10 +22,12 @@ const lightmap_shader_vs: [:0]const u8 =
     \\out vec4 fragColor;
     \\
     \\uniform mat4 mvp;
-    \\uniform vec2 texOffset;
-    \\uniform vec2 texScale;
+    \\uniform float shaderTime;
     \\uniform int useEnvironmentTc;
     \\uniform vec3 cameraPosition;
+    \\uniform int tcModCount;
+    \\uniform int tcModKinds[4];
+    \\uniform vec4 tcModValues[4];
     \\
     \\void main() {
     \\    vec2 stageTexCoord = vertexTexCoord;
@@ -35,7 +37,31 @@ const lightmap_shader_vs: [:0]const u8 =
     \\        vec3 reflected = reflect(-viewDir, normal);
     \\        stageTexCoord = reflected.xy * 0.5 + 0.5;
     \\    }
-    \\    fragTexCoord = stageTexCoord * texScale + texOffset;
+    \\    for (int i = 0; i < tcModCount; ++i) {
+    \\        int modKind = tcModKinds[i];
+    \\        vec4 modValues = tcModValues[i];
+    \\        if (modKind == 1) {
+    \\            vec2 scroll = modValues.xy * shaderTime;
+    \\            stageTexCoord += scroll - floor(scroll);
+    \\        } else if (modKind == 2) {
+    \\            stageTexCoord *= modValues.xy;
+    \\        } else if (modKind == 3) {
+    \\            float radiansValue = radians(-modValues.x * shaderTime);
+    \\            float sinValue = sin(radiansValue);
+    \\            float cosValue = cos(radiansValue);
+    \\            vec2 centered = stageTexCoord - vec2(0.5, 0.5);
+    \\            stageTexCoord = vec2(
+    \\                centered.x * cosValue - centered.y * sinValue,
+    \\                centered.x * sinValue + centered.y * cosValue
+    \\            ) + vec2(0.5, 0.5);
+    \\        } else if (modKind == 4) {
+    \\            float now = modValues.z + shaderTime * modValues.w;
+    \\            float sOffset = sin((((vertexPosition.x + vertexPosition.z) * (1.0 / 128.0) * 0.125) + now) * 6.28318530718) * modValues.y;
+    \\            float tOffset = sin(((vertexPosition.y * (1.0 / 128.0) * 0.125) + now) * 6.28318530718) * modValues.y;
+    \\            stageTexCoord += vec2(sOffset, tOffset);
+    \\        }
+    \\    }
+    \\    fragTexCoord = stageTexCoord;
     \\    fragTexCoord2 = vertexTexCoord2;
     \\    fragColor = vertexColor;
     \\    gl_Position = mvp * vec4(vertexPosition, 1.0);
@@ -192,8 +218,8 @@ const MaterialBinding = struct {
     static_texture: rl.Texture2D,
     animated_frames: []rl.Texture2D = &.{},
     fps: f32 = 0.0,
-    uv_scroll: [2]f32 = .{ 0.0, 0.0 },
-    uv_scale: [2]f32 = .{ 1.0, 1.0 },
+    tcmods: [qshader.max_tcmods]qshader.TcMod = [_]qshader.TcMod{.{ .kind = .scroll }} ** qshader.max_tcmods,
+    tcmod_count: u8 = 0,
     material_color: [4]f32 = .{ 1.0, 1.0, 1.0, 1.0 },
     use_vertex_rgb: bool = false,
     use_vertex_alpha: bool = false,
@@ -220,12 +246,6 @@ const MaterialBinding = struct {
         }
     }
 
-    fn currentUvOffset(self: *const MaterialBinding, time_seconds: f64) [2]f32 {
-        return .{
-            wrapUnitOffset(self.uv_scroll[0], time_seconds),
-            wrapUnitOffset(self.uv_scroll[1], time_seconds),
-        };
-    }
 };
 
 pub const SceneObject = struct {
@@ -262,8 +282,10 @@ pub const SceneRenderer = struct {
     material_color_loc: i32,
     use_vertex_rgb_loc: i32,
     use_vertex_alpha_loc: i32,
-    tex_offset_loc: i32,
-    tex_scale_loc: i32,
+    shader_time_loc: i32,
+    tcmod_count_loc: i32,
+    tcmod_kinds_loc: i32,
+    tcmod_values_loc: i32,
     use_environment_tc_loc: i32,
     camera_position_loc: i32,
     lightmap_scale_tuning: f32 = 1.0,
@@ -425,8 +447,10 @@ pub const SceneRenderer = struct {
             .material_color_loc = rl.getShaderLocation(lightmap_shader, "materialColor"),
             .use_vertex_rgb_loc = rl.getShaderLocation(lightmap_shader, "useVertexRgb"),
             .use_vertex_alpha_loc = rl.getShaderLocation(lightmap_shader, "useVertexAlpha"),
-            .tex_offset_loc = rl.getShaderLocation(lightmap_shader, "texOffset"),
-            .tex_scale_loc = rl.getShaderLocation(lightmap_shader, "texScale"),
+            .shader_time_loc = rl.getShaderLocation(lightmap_shader, "shaderTime"),
+            .tcmod_count_loc = rl.getShaderLocation(lightmap_shader, "tcModCount"),
+            .tcmod_kinds_loc = rl.getShaderLocation(lightmap_shader, "tcModKinds"),
+            .tcmod_values_loc = rl.getShaderLocation(lightmap_shader, "tcModValues"),
             .use_environment_tc_loc = rl.getShaderLocation(lightmap_shader, "useEnvironmentTc"),
             .camera_position_loc = rl.getShaderLocation(lightmap_shader, "cameraPosition"),
         };
@@ -673,14 +697,22 @@ pub const SceneRenderer = struct {
             const use_vertex_rgb: i32 = if (batch.binding.use_vertex_rgb) 1 else 0;
             const use_vertex_alpha: i32 = if (batch.binding.use_vertex_alpha) 1 else 0;
             const use_environment_tc: i32 = if (batch.binding.use_environment_tc) 1 else 0;
+            const shader_time: f32 = @floatCast(time_seconds);
+            var tcmod_kinds: [qshader.max_tcmods]i32 = .{ 0, 0, 0, 0 };
+            var tcmod_values: [qshader.max_tcmods][4]f32 = [_][4]f32{ .{ 0.0, 0.0, 0.0, 0.0 } } ** qshader.max_tcmods;
+            for (0..batch.binding.tcmod_count) |index| {
+                tcmod_kinds[index] = @intFromEnum(batch.binding.tcmods[index].kind);
+                tcmod_values[index] = batch.binding.tcmods[index].values;
+            }
             rl.setShaderValue(self.lightmap_shader, self.use_vertex_rgb_loc, &use_vertex_rgb, .int);
             rl.setShaderValue(self.lightmap_shader, self.use_vertex_alpha_loc, &use_vertex_alpha, .int);
-            const tex_offset = batch.binding.currentUvOffset(time_seconds);
-            rl.setShaderValue(self.lightmap_shader, self.tex_scale_loc, &batch.binding.uv_scale, .vec2);
             rl.setShaderValue(self.lightmap_shader, self.use_environment_tc_loc, &use_environment_tc, .int);
             const camera_position = [3]f32{ camera.position.x, camera.position.y, camera.position.z };
             rl.setShaderValue(self.lightmap_shader, self.camera_position_loc, &camera_position, .vec3);
-            rl.setShaderValue(self.lightmap_shader, self.tex_offset_loc, &tex_offset, .vec2);
+            rl.setShaderValue(self.lightmap_shader, self.shader_time_loc, &shader_time, .float);
+            rl.setShaderValue(self.lightmap_shader, self.tcmod_count_loc, &batch.binding.tcmod_count, .int);
+            rl.setShaderValueV(self.lightmap_shader, self.tcmod_kinds_loc, &tcmod_kinds, .int, qshader.max_tcmods);
+            rl.setShaderValueV(self.lightmap_shader, self.tcmod_values_loc, &tcmod_values, .vec4, qshader.max_tcmods);
 
             const texture = batch.binding.currentTexture(time_seconds);
             batch.model.materials[0].maps[@intFromEnum(rl.MATERIAL_MAP_DIFFUSE)].texture = texture;
@@ -835,12 +867,6 @@ pub const SceneRenderer = struct {
         return !self.frustum_culling or self.last_camera_frustum.containsBox(billboard.bounds);
     }
 };
-
-fn wrapUnitOffset(speed: f32, time_seconds: f64) f32 {
-    if (speed == 0.0) return 0.0;
-    const value = @as(f64, speed) * time_seconds;
-    return @floatCast(value - @floor(value));
-}
 
 const TextureCache = struct {
     allocator: std.mem.Allocator,
@@ -1018,8 +1044,8 @@ const TextureCache = struct {
                             .static_texture = frames[0],
                             .animated_frames = frames,
                             .fps = stage.fps,
-                            .uv_scroll = stage.tcmod_scroll,
-                            .uv_scale = stage.tcmod_scale,
+                            .tcmods = stage.tcmods,
+                            .tcmod_count = stage.tcmod_count,
                             .material_color = stage.const_color,
                             .use_vertex_rgb = stage.rgb_gen == .vertex,
                             .use_vertex_alpha = stage.alpha_gen == .vertex,
@@ -1035,8 +1061,8 @@ const TextureCache = struct {
                             var binding: MaterialBinding = .{
                                 .mode = .static,
                                 .static_texture = texture,
-                                .uv_scroll = stage.tcmod_scroll,
-                                .uv_scale = stage.tcmod_scale,
+                                .tcmods = stage.tcmods,
+                                .tcmod_count = stage.tcmod_count,
                                 .material_color = stage.const_color,
                                 .use_vertex_rgb = stage.rgb_gen == .vertex,
                                 .use_vertex_alpha = stage.alpha_gen == .vertex,

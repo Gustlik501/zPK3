@@ -45,14 +45,28 @@ pub const TcGen = enum {
     environment,
 };
 
+pub const max_tcmods = 4;
+
+pub const TcModKind = enum(i32) {
+    scroll = 1,
+    scale = 2,
+    rotate = 3,
+    turb = 4,
+};
+
+pub const TcMod = struct {
+    kind: TcModKind,
+    values: [4]f32 = .{ 0.0, 0.0, 0.0, 0.0 },
+};
+
 pub const Stage = struct {
     map_kind: MapKind = .map,
     blend_mode: BlendMode = .solid,
     alpha_cutout: bool = false,
     fps: f32 = 0.0,
     tcgen: TcGen = .base,
-    tcmod_scroll: [2]f32 = .{ 0.0, 0.0 },
-    tcmod_scale: [2]f32 = .{ 1.0, 1.0 },
+    tcmods: [max_tcmods]TcMod = [_]TcMod{.{ .kind = .scroll }} ** max_tcmods,
+    tcmod_count: u8 = 0,
     rgb_gen: ColorGen = .identity,
     alpha_gen: AlphaGen = .identity,
     const_color: [4]f32 = .{ 1.0, 1.0, 1.0, 1.0 },
@@ -422,14 +436,25 @@ fn consumeStageLine(allocator: std.mem.Allocator, stage: *Stage, line: []const u
     if (std.mem.eql(u8, keyword, "tcmod") or std.mem.eql(u8, keyword, "tcMod")) {
         const mode = tokens.next() orelse return false;
         if (std.mem.eql(u8, mode, "scroll")) {
-            stage.tcmod_scroll[0] = std.fmt.parseFloat(f32, tokens.next() orelse return false) catch return false;
-            stage.tcmod_scroll[1] = std.fmt.parseFloat(f32, tokens.next() orelse return false) catch return false;
-            return true;
+            const s = std.fmt.parseFloat(f32, tokens.next() orelse return false) catch return false;
+            const t = std.fmt.parseFloat(f32, tokens.next() orelse return false) catch return false;
+            return appendTcMod(stage, .{ .kind = .scroll, .values = .{ s, t, 0.0, 0.0 } });
         }
         if (std.mem.eql(u8, mode, "scale")) {
-            stage.tcmod_scale[0] = std.fmt.parseFloat(f32, tokens.next() orelse return false) catch return false;
-            stage.tcmod_scale[1] = std.fmt.parseFloat(f32, tokens.next() orelse return false) catch return false;
-            return true;
+            const s = std.fmt.parseFloat(f32, tokens.next() orelse return false) catch return false;
+            const t = std.fmt.parseFloat(f32, tokens.next() orelse return false) catch return false;
+            return appendTcMod(stage, .{ .kind = .scale, .values = .{ s, t, 0.0, 0.0 } });
+        }
+        if (std.mem.eql(u8, mode, "rotate")) {
+            const speed = std.fmt.parseFloat(f32, tokens.next() orelse return false) catch return false;
+            return appendTcMod(stage, .{ .kind = .rotate, .values = .{ speed, 0.0, 0.0, 0.0 } });
+        }
+        if (std.mem.eql(u8, mode, "turb")) {
+            const base = std.fmt.parseFloat(f32, tokens.next() orelse return false) catch return false;
+            const amplitude = std.fmt.parseFloat(f32, tokens.next() orelse return false) catch return false;
+            const phase = std.fmt.parseFloat(f32, tokens.next() orelse return false) catch return false;
+            const frequency = std.fmt.parseFloat(f32, tokens.next() orelse return false) catch return false;
+            return appendTcMod(stage, .{ .kind = .turb, .values = .{ base, amplitude, phase, frequency } });
         }
         return false;
     }
@@ -444,6 +469,13 @@ fn consumeStageLine(allocator: std.mem.Allocator, stage: *Stage, line: []const u
     }
 
     return false;
+}
+
+fn appendTcMod(stage: *Stage, mod: TcMod) bool {
+    if (stage.tcmod_count >= max_tcmods) return false;
+    stage.tcmods[stage.tcmod_count] = mod;
+    stage.tcmod_count += 1;
+    return true;
 }
 
 fn trimShaderLine(raw_line: []const u8) []const u8 {
@@ -560,6 +592,8 @@ test "parse shader stage color alpha and tcmod" {
         \\        alphaGen const 0.5
         \\        tcMod scroll 0.25 -0.5
         \\        tcMod scale 2 3
+        \\        tcMod rotate 45
+        \\        tcMod turb 0 0.125 0 1
         \\        tcGen environment
         \\    }
         \\}
@@ -578,10 +612,18 @@ test "parse shader stage color alpha and tcmod" {
     try std.testing.expect(definition.stages[0].rgb_gen == .vertex);
     try std.testing.expect(definition.stages[0].alpha_gen == .constant);
     try std.testing.expectEqual(@as(f32, 0.5), definition.stages[0].const_color[3]);
-    try std.testing.expectEqual(@as(f32, 0.25), definition.stages[0].tcmod_scroll[0]);
-    try std.testing.expectEqual(@as(f32, -0.5), definition.stages[0].tcmod_scroll[1]);
-    try std.testing.expectEqual(@as(f32, 2.0), definition.stages[0].tcmod_scale[0]);
-    try std.testing.expectEqual(@as(f32, 3.0), definition.stages[0].tcmod_scale[1]);
+    try std.testing.expectEqual(@as(u8, 4), definition.stages[0].tcmod_count);
+    try std.testing.expect(definition.stages[0].tcmods[0].kind == .scroll);
+    try std.testing.expectEqual(@as(f32, 0.25), definition.stages[0].tcmods[0].values[0]);
+    try std.testing.expectEqual(@as(f32, -0.5), definition.stages[0].tcmods[0].values[1]);
+    try std.testing.expect(definition.stages[0].tcmods[1].kind == .scale);
+    try std.testing.expectEqual(@as(f32, 2.0), definition.stages[0].tcmods[1].values[0]);
+    try std.testing.expectEqual(@as(f32, 3.0), definition.stages[0].tcmods[1].values[1]);
+    try std.testing.expect(definition.stages[0].tcmods[2].kind == .rotate);
+    try std.testing.expectEqual(@as(f32, 45.0), definition.stages[0].tcmods[2].values[0]);
+    try std.testing.expect(definition.stages[0].tcmods[3].kind == .turb);
+    try std.testing.expectEqual(@as(f32, 0.125), definition.stages[0].tcmods[3].values[1]);
+    try std.testing.expectEqual(@as(f32, 1.0), definition.stages[0].tcmods[3].values[3]);
     try std.testing.expect(definition.stages[0].tcgen == .environment);
 }
 
