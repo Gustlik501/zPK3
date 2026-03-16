@@ -54,6 +54,7 @@ const lightmap_shader_fs: [:0]const u8 =
     \\uniform sampler2D texture1;
     \\uniform int useLightmap;
     \\uniform float lightmapScale;
+    \\uniform float lightmapGamma;
     \\uniform float alphaCutoff;
     \\uniform vec4 materialColor;
     \\uniform int useVertexRgb;
@@ -68,7 +69,7 @@ const lightmap_shader_fs: [:0]const u8 =
     \\    vec3 light = vec3(1.0);
     \\    if (useLightmap == 1) {
     \\        light = texture(texture1, fragTexCoord2).rgb;
-    \\        light = pow(light, vec3(0.85)) * lightmapScale;
+    \\        light = pow(max(light, vec3(0.0)), vec3(lightmapGamma)) * lightmapScale;
     \\    }
     \\    finalColor = vec4(albedo.rgb * light, albedo.a);
     \\}
@@ -258,6 +259,7 @@ pub const SceneRenderer = struct {
     lightmap_shader: rl.Shader,
     lightmap_use_loc: i32,
     lightmap_scale_loc: i32,
+    lightmap_gamma_loc: i32,
     alpha_cutoff_loc: i32,
     material_color_loc: i32,
     use_vertex_rgb_loc: i32,
@@ -266,6 +268,8 @@ pub const SceneRenderer = struct {
     tex_scale_loc: i32,
     use_environment_tc_loc: i32,
     camera_position_loc: i32,
+    lightmap_scale_tuning: f32 = 2.0,
+    lightmap_gamma_tuning: f32 = 0.85,
     draw_wireframe: bool = false,
     fullbright: bool = false,
     backface_culling: bool = true,
@@ -420,6 +424,7 @@ pub const SceneRenderer = struct {
             .lightmap_shader = lightmap_shader,
             .lightmap_use_loc = rl.getShaderLocation(lightmap_shader, "useLightmap"),
             .lightmap_scale_loc = rl.getShaderLocation(lightmap_shader, "lightmapScale"),
+            .lightmap_gamma_loc = rl.getShaderLocation(lightmap_shader, "lightmapGamma"),
             .alpha_cutoff_loc = rl.getShaderLocation(lightmap_shader, "alphaCutoff"),
             .material_color_loc = rl.getShaderLocation(lightmap_shader, "materialColor"),
             .use_vertex_rgb_loc = rl.getShaderLocation(lightmap_shader, "useVertexRgb"),
@@ -557,6 +562,19 @@ pub const SceneRenderer = struct {
         return self.texture_cache.metadataMemoryBytes() + self.lightmap_cache.metadataMemoryBytes();
     }
 
+    pub fn adjustLightmapScale(self: *SceneRenderer, delta: f32) void {
+        self.lightmap_scale_tuning = @max(0.25, @min(4.0, self.lightmap_scale_tuning + delta));
+    }
+
+    pub fn adjustLightmapGamma(self: *SceneRenderer, delta: f32) void {
+        self.lightmap_gamma_tuning = @max(0.5, @min(1.5, self.lightmap_gamma_tuning + delta));
+    }
+
+    pub fn resetLightmapTuning(self: *SceneRenderer) void {
+        self.lightmap_scale_tuning = 2.0;
+        self.lightmap_gamma_tuning = 0.85;
+    }
+
     fn updateVisibilityState(self: *SceneRenderer, camera_position: rl.Vector3) void {
         self.last_camera_leaf_index = self.map.findLeafIndex(.{
             .x = camera_position.x,
@@ -656,9 +674,11 @@ pub const SceneRenderer = struct {
                 }
             }
             const use_lightmap: i32 = if (self.fullbright or self.draw_wireframe or !batch.use_lightmap) 0 else 1;
-            const lightmap_scale: f32 = if (self.fullbright or self.draw_wireframe or !batch.use_lightmap) 1.0 else 2.0;
+            const lightmap_scale: f32 = if (self.fullbright or self.draw_wireframe or !batch.use_lightmap) 1.0 else self.lightmap_scale_tuning;
+            const lightmap_gamma: f32 = if (self.fullbright or self.draw_wireframe or !batch.use_lightmap) 1.0 else self.lightmap_gamma_tuning;
             rl.setShaderValue(self.lightmap_shader, self.lightmap_use_loc, &use_lightmap, .int);
             rl.setShaderValue(self.lightmap_shader, self.lightmap_scale_loc, &lightmap_scale, .float);
+            rl.setShaderValue(self.lightmap_shader, self.lightmap_gamma_loc, &lightmap_gamma, .float);
             rl.setShaderValue(self.lightmap_shader, self.alpha_cutoff_loc, &batch.alpha_cutoff, .float);
             rl.setShaderValue(self.lightmap_shader, self.material_color_loc, &batch.binding.material_color, .vec4);
             const use_vertex_rgb: i32 = if (batch.binding.use_vertex_rgb) 1 else 0;

@@ -65,7 +65,7 @@ pub fn run(allocator: std.mem.Allocator) !void {
     var inspector: InspectorState = .{};
     var profiler: FrameProfiler = .{};
     var frame_count: usize = 0;
-    rl.setTargetFPS(144);
+    rl.setTargetFPS(1000);
 
     while (!rl.windowShouldClose()) {
         const frame_start_ns = std.time.nanoTimestamp();
@@ -453,6 +453,9 @@ fn drawInspector(
     _ = imgui.checkbox("Backface culling", &renderer.backface_culling);
     _ = imgui.checkbox("Show runtime stats window", &inspector.stats_visible);
 
+    imgui.separator();
+    drawLightingInspector(renderer);
+
     if (imgui.button("Previous")) renderer.selectPreviousSceneObject();
     imgui.sameLine();
     if (imgui.button("Next")) renderer.selectNextSceneObject();
@@ -539,6 +542,28 @@ fn drawVisibilityInspector(
     } else {
         imgui.text("Visible leaves: unavailable outside BSP leaves.");
     }
+}
+
+fn drawLightingInspector(renderer: *q3.renderer.SceneRenderer) void {
+    var line_buf: [192]u8 = undefined;
+    imgui.text("Lighting");
+
+    const summary = std.fmt.bufPrintZ(
+        &line_buf,
+        "Lightmap scale: {d:.2}  gamma: {d:.2}",
+        .{ renderer.lightmap_scale_tuning, renderer.lightmap_gamma_tuning },
+    ) catch return;
+    imgui.text(summary);
+
+    if (imgui.button("Scale -")) renderer.adjustLightmapScale(-0.1);
+    imgui.sameLine();
+    if (imgui.button("Scale +")) renderer.adjustLightmapScale(0.1);
+    imgui.sameLine();
+    if (imgui.button("Gamma -")) renderer.adjustLightmapGamma(-0.05);
+    imgui.sameLine();
+    if (imgui.button("Gamma +")) renderer.adjustLightmapGamma(0.05);
+
+    if (imgui.button("Reset lighting")) renderer.resetLightmapTuning();
 }
 
 const FrameSample = struct {
@@ -780,6 +805,13 @@ fn drawRuntimeStatsWindow(
     ) catch return;
     imgui.text(visibility_line);
 
+    const lighting_line = std.fmt.bufPrintZ(
+        &line_buf,
+        "Lighting: lightmap scale={d:.2}  gamma={d:.2}",
+        .{ renderer.lightmap_scale_tuning, renderer.lightmap_gamma_tuning },
+    ) catch return;
+    imgui.text(lighting_line);
+
     const memory_line = std.fmt.bufPrintZ(
         &line_buf,
         "CPU est: geom {s}  wire {s}  materials {s}  vis {s}  total tracked {s}",
@@ -975,6 +1007,10 @@ fn dumpStatsReport(
             renderer.stats.pvs_culled_world_batch_count,
             renderer.stats.frustum_culled_world_batch_count,
         },
+    );
+    std.debug.print(
+        "lighting: lightmap_scale={d:.3} lightmap_gamma={d:.3}\n",
+        .{ renderer.lightmap_scale_tuning, renderer.lightmap_gamma_tuning },
     );
     std.debug.print(
         "tracked_bytes: total={d} bsp={d} entities={d} collision={d} scene_objects={d} cache_meta={d} geometry={d} wireframe={d} materials={d} visibility={d} textures={d} lightmaps={d}\n",
