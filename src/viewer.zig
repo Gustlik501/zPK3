@@ -63,7 +63,10 @@ pub fn run(allocator: std.mem.Allocator) !void {
     applyCameraOverrides(&camera, options);
     var controller = CameraController.init(camera);
     var inspector: InspectorState = .{};
+    if (options.inspector_visible) |visible| inspector.visible = visible;
+    if (options.stats_visible) |visible| inspector.stats_visible = visible;
     var profiler: FrameProfiler = .{};
+    var benchmark: BenchmarkProfiler = .{};
     var frame_count: usize = 0;
     rl.setTargetFPS(1000);
 
@@ -141,6 +144,16 @@ pub fn run(allocator: std.mem.Allocator) !void {
             .present_wait_ns = nsBetween(cpu_frame_end_ns, frame_end_ns),
             .total_frame_ns = nsBetween(frame_start_ns, frame_end_ns),
         });
+        benchmark.record(.{
+            .input_ns = nsBetween(input_start_ns, input_end_ns),
+            .collision_ns = nsBetween(collision_start_ns, collision_end_ns),
+            .world_draw_ns = nsBetween(world_draw_start_ns, world_draw_end_ns),
+            .ui_ns = nsBetween(ui_start_ns, ui_end_ns),
+            .overlay_ns = nsBetween(overlay_start_ns, overlay_end_ns),
+            .cpu_frame_ns = nsBetween(frame_start_ns, cpu_frame_end_ns),
+            .present_wait_ns = nsBetween(cpu_frame_end_ns, frame_end_ns),
+            .total_frame_ns = nsBetween(frame_start_ns, frame_end_ns),
+        });
 
         frame_count += 1;
         if (frame_count == 1) {
@@ -161,6 +174,7 @@ pub fn run(allocator: std.mem.Allocator) !void {
                 &renderer,
                 camera,
                 validation.issueCount(),
+                &benchmark,
             );
             break;
         }
@@ -171,9 +185,12 @@ const RunOptions = struct {
     source_path: []const u8 = "assets/maps",
     requested_bsp: ?[]const u8 = null,
     dump_stats: bool = false,
+    benchmark: bool = false,
     max_frames: usize = 1,
     camera_position: ?rl.Vector3 = null,
     camera_target: ?rl.Vector3 = null,
+    inspector_visible: ?bool = null,
+    stats_visible: ?bool = null,
 };
 
 fn parseRunOptions(args: []const []const u8) !RunOptions {
@@ -187,11 +204,33 @@ fn parseRunOptions(args: []const []const u8) !RunOptions {
             options.dump_stats = true;
             continue;
         }
+        if (std.mem.eql(u8, arg, "--benchmark")) {
+            options.benchmark = true;
+            options.dump_stats = true;
+            if (options.max_frames == 1) options.max_frames = 300;
+            continue;
+        }
         if (std.mem.eql(u8, arg, "--frames")) {
             i += 1;
             if (i >= args.len) return error.MissingFramesValue;
             options.max_frames = try std.fmt.parseInt(usize, args[i], 10);
             if (options.max_frames == 0) options.max_frames = 1;
+            continue;
+        }
+        if (std.mem.eql(u8, arg, "--show-inspector")) {
+            options.inspector_visible = true;
+            continue;
+        }
+        if (std.mem.eql(u8, arg, "--hide-inspector")) {
+            options.inspector_visible = false;
+            continue;
+        }
+        if (std.mem.eql(u8, arg, "--show-stats")) {
+            options.stats_visible = true;
+            continue;
+        }
+        if (std.mem.eql(u8, arg, "--hide-stats")) {
+            options.stats_visible = false;
             continue;
         }
         if (std.mem.eql(u8, arg, "--camera")) {
@@ -612,6 +651,73 @@ const FrameProfiler = struct {
     }
 };
 
+const BenchmarkMetric = struct {
+    total_ns: u128 = 0,
+    min_ns: u64 = std.math.maxInt(u64),
+    max_ns: u64 = 0,
+
+    fn record(self: *BenchmarkMetric, ns: u64) void {
+        self.total_ns += ns;
+        if (ns < self.min_ns) self.min_ns = ns;
+        if (ns > self.max_ns) self.max_ns = ns;
+    }
+
+    fn averageMs(self: BenchmarkMetric, sample_count: usize) f64 {
+        if (sample_count == 0) return 0.0;
+        return @as(f64, @floatFromInt(self.total_ns)) / @as(f64, @floatFromInt(sample_count)) / 1_000_000.0;
+    }
+
+    fn minMs(self: BenchmarkMetric) f64 {
+        if (self.min_ns == std.math.maxInt(u64)) return 0.0;
+        return @as(f64, @floatFromInt(self.min_ns)) / 1_000_000.0;
+    }
+
+    fn maxMs(self: BenchmarkMetric) f64 {
+        return @as(f64, @floatFromInt(self.max_ns)) / 1_000_000.0;
+    }
+};
+
+const BenchmarkProfiler = struct {
+    frame_count: usize = 0,
+    input: BenchmarkMetric = .{},
+    collision: BenchmarkMetric = .{},
+    world_draw: BenchmarkMetric = .{},
+    ui: BenchmarkMetric = .{},
+    overlay: BenchmarkMetric = .{},
+    cpu_frame: BenchmarkMetric = .{},
+    present_wait: BenchmarkMetric = .{},
+    total_frame: BenchmarkMetric = .{},
+
+    fn record(self: *BenchmarkProfiler, sample: FrameSample) void {
+        self.frame_count += 1;
+        self.input.record(sample.input_ns);
+        self.collision.record(sample.collision_ns);
+        self.world_draw.record(sample.world_draw_ns);
+        self.ui.record(sample.ui_ns);
+        self.overlay.record(sample.overlay_ns);
+        self.cpu_frame.record(sample.cpu_frame_ns);
+        self.present_wait.record(sample.present_wait_ns);
+        self.total_frame.record(sample.total_frame_ns);
+    }
+
+    fn averageFps(self: BenchmarkProfiler) f64 {
+        if (self.frame_count == 0 or self.total_frame.total_ns == 0) return 0.0;
+        return @as(f64, @floatFromInt(self.frame_count)) * 1_000_000_000.0 / @as(f64, @floatFromInt(self.total_frame.total_ns));
+    }
+
+    fn minFps(self: BenchmarkProfiler) f64 {
+        const max_ms = self.total_frame.maxMs();
+        if (max_ms <= 0.0) return 0.0;
+        return 1000.0 / max_ms;
+    }
+
+    fn maxFps(self: BenchmarkProfiler) f64 {
+        const min_ms = self.total_frame.minMs();
+        if (min_ms <= 0.0) return 0.0;
+        return 1000.0 / min_ms;
+    }
+};
+
 const ProcessMemoryStats = struct {
     rss_bytes: ?usize = null,
     virtual_bytes: ?usize = null,
@@ -922,6 +1028,7 @@ fn dumpStatsReport(
     renderer: *const q3.renderer.SceneRenderer,
     camera: rl.Camera,
     validation_issue_count: usize,
+    benchmark: *const BenchmarkProfiler,
 ) void {
     const tracked_total = totalTrackedBytes(map, entity_list, collision_world, renderer);
     const bsp_bytes = map.estimatedMemoryBytes();
@@ -936,6 +1043,13 @@ fn dumpStatsReport(
     std.debug.print("requested_bsp: {s}\n", .{options.requested_bsp orelse map.path});
     std.debug.print("frames: {d}\n", .{options.max_frames});
     std.debug.print(
+        "panels: inspector={s} stats={s}\n",
+        .{
+            if (options.inspector_visible orelse true) "true" else "false",
+            if (options.stats_visible orelse true) "true" else "false",
+        },
+    );
+    std.debug.print(
         "camera: pos=({d:.2}, {d:.2}, {d:.2}) target=({d:.2}, {d:.2}, {d:.2})\n",
         .{
             camera.position.x,
@@ -947,6 +1061,32 @@ fn dumpStatsReport(
         },
     );
     std.debug.print("fps: {d}\n", .{rl.getFPS()});
+    if (benchmark.frame_count > 0) {
+        std.debug.print(
+            "benchmark_fps: avg={d:.2} min={d:.2} max={d:.2}\n",
+            .{ benchmark.averageFps(), benchmark.minFps(), benchmark.maxFps() },
+        );
+        std.debug.print(
+            "benchmark_frame_ms: avg={d:.3} min={d:.3} max={d:.3}\n",
+            .{
+                benchmark.total_frame.averageMs(benchmark.frame_count),
+                benchmark.total_frame.minMs(),
+                benchmark.total_frame.maxMs(),
+            },
+        );
+        std.debug.print(
+            "benchmark_timings_ms: input={d:.3} collision={d:.3} world_draw={d:.3} imgui={d:.3} overlay={d:.3} cpu={d:.3} present={d:.3}\n",
+            .{
+                benchmark.input.averageMs(benchmark.frame_count),
+                benchmark.collision.averageMs(benchmark.frame_count),
+                benchmark.world_draw.averageMs(benchmark.frame_count),
+                benchmark.ui.averageMs(benchmark.frame_count),
+                benchmark.overlay.averageMs(benchmark.frame_count),
+                benchmark.cpu_frame.averageMs(benchmark.frame_count),
+                benchmark.present_wait.averageMs(benchmark.frame_count),
+            },
+        );
+    }
     std.debug.print(
         "frame_ms: {d:.3} cpu_ms: {d:.3} present_ms: {d:.3}\n",
         .{ rl.getFrameTime() * 1000.0, profiler.cpu_frame.current_ms, profiler.present_wait.current_ms },
