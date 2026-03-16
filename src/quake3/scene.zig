@@ -32,6 +32,7 @@ pub const SceneStats = struct {
 
 pub const RenderMode = enum {
     solid,
+    filter,
     alpha,
     additive,
 };

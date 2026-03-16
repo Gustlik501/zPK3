@@ -479,6 +479,8 @@ pub const SceneRenderer = struct {
 
         self.drawBatches(.solid);
         self.drawBillboards(.solid, camera);
+        self.drawBatches(.filter);
+        self.drawBillboards(.filter, camera);
         self.drawBatches(.alpha);
         self.drawBillboards(.alpha, camera);
         self.drawBatches(.additive);
@@ -620,12 +622,17 @@ pub const SceneRenderer = struct {
     fn drawBatches(self: *SceneRenderer, mode: RenderMode) void {
         switch (mode) {
             .solid => {},
+            .filter => rl.beginBlendMode(.multiplied),
             .alpha => rl.beginBlendMode(.alpha),
             .additive => rl.beginBlendMode(.additive),
         }
+        if (mode != .solid) rlgl.rlDisableDepthMask();
         defer switch (mode) {
             .solid => {},
-            .alpha, .additive => rl.endBlendMode(),
+            .filter, .alpha, .additive => {
+                rlgl.rlEnableDepthMask();
+                rl.endBlendMode();
+            },
         };
 
         const time_seconds = rl.getTime();
@@ -675,12 +682,17 @@ pub const SceneRenderer = struct {
     fn drawBillboards(self: *SceneRenderer, mode: RenderMode, camera: rl.Camera) void {
         switch (mode) {
             .solid => {},
+            .filter => rl.beginBlendMode(.multiplied),
             .alpha => rl.beginBlendMode(.alpha),
             .additive => rl.beginBlendMode(.additive),
         }
+        if (mode != .solid) rlgl.rlDisableDepthMask();
         defer switch (mode) {
             .solid => {},
-            .alpha, .additive => rl.endBlendMode(),
+            .filter, .alpha, .additive => {
+                rlgl.rlEnableDepthMask();
+                rl.endBlendMode();
+            },
         };
 
         const time_seconds = rl.getTime();
@@ -1104,9 +1116,14 @@ const TextureCache = struct {
                 }
 
                 switch (stage.blend_mode) {
-                    .solid, .filter => {},
+                    .solid => {},
+                    .filter => {
+                        if (rule.render_mode == .solid) rule.render_mode = .filter;
+                        rule.use_lightmap = false;
+                    },
                     .alpha => {
                         if (rule.render_mode != .additive) rule.render_mode = .alpha;
+                        rule.use_lightmap = false;
                     },
                     .additive => {
                         rule.render_mode = .additive;

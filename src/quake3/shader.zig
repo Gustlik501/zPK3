@@ -445,6 +445,13 @@ fn parseBlendMode(first: []const u8, second: ?[]const u8) ?BlendMode {
         {
             return .filter;
         }
+        if ((std.mem.eql(u8, first, "GL_DST_COLOR") or std.mem.eql(u8, first, "gl_dst_color")) and
+            (std.mem.eql(u8, rhs, "GL_ONE") or std.mem.eql(u8, rhs, "gl_one")))
+        {
+            // Common on Quake 3 water/liquid shaders; multiply is a closer approximation
+            // than treating it as opaque alpha in the current single-pass runtime.
+            return .filter;
+        }
         if ((std.mem.eql(u8, first, "GL_ONE") or std.mem.eql(u8, first, "gl_one")) and
             (std.mem.eql(u8, rhs, "GL_ONE") or std.mem.eql(u8, rhs, "gl_one")))
         {
