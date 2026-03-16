@@ -95,37 +95,8 @@ const SurfaceBillboard = struct {
     color: [4]u8,
 };
 
-const Plane = struct {
-    normal: rl.Vector3,
-    distance: f32,
-
-    fn normalize(self: Plane) Plane {
-        const length = @sqrt(
-            self.normal.x * self.normal.x +
-                self.normal.y * self.normal.y +
-                self.normal.z * self.normal.z,
-        );
-        if (length <= 0.0001) return self;
-        return .{
-            .normal = .{
-                .x = self.normal.x / length,
-                .y = self.normal.y / length,
-                .z = self.normal.z / length,
-            },
-            .distance = self.distance / length,
-        };
-    }
-
-    fn distanceToPoint(self: Plane, point: rl.Vector3) f32 {
-        return self.normal.x * point.x +
-            self.normal.y * point.y +
-            self.normal.z * point.z +
-            self.distance;
-    }
-};
-
 const CameraFrustum = struct {
-    planes: [6]Plane,
+    view_projection: rl.Matrix,
 
     fn fromCamera(camera: rl.Camera) CameraFrustum {
         const aspect = @as(f64, @floatFromInt(@max(rl.getScreenWidth(), 1))) /
@@ -147,39 +118,42 @@ const CameraFrustum = struct {
             ),
         };
         const view = camera.getMatrix();
-        const view_projection = raymath.matrixMultiply(projection, view);
-        return .{
-            .planes = .{
-                extractPlane(view_projection, .left),
-                extractPlane(view_projection, .right),
-                extractPlane(view_projection, .bottom),
-                extractPlane(view_projection, .top),
-                extractPlane(view_projection, .near),
-                extractPlane(view_projection, .far),
-            },
-        };
+        return .{ .view_projection = raymath.matrixMultiply(projection, view) };
     }
 
     fn containsBox(self: CameraFrustum, bounds: rl.BoundingBox) bool {
-        for (self.planes) |plane| {
-            const point: rl.Vector3 = .{
-                .x = if (plane.normal.x >= 0.0) bounds.max.x else bounds.min.x,
-                .y = if (plane.normal.y >= 0.0) bounds.max.y else bounds.min.y,
-                .z = if (plane.normal.z >= 0.0) bounds.max.z else bounds.min.z,
-            };
-            if (plane.distanceToPoint(point) < 0.0) return false;
-        }
-        return true;
-    }
-};
+        const corners = [_]rl.Vector3{
+            .{ .x = bounds.min.x, .y = bounds.min.y, .z = bounds.min.z },
+            .{ .x = bounds.max.x, .y = bounds.min.y, .z = bounds.min.z },
+            .{ .x = bounds.min.x, .y = bounds.max.y, .z = bounds.min.z },
+            .{ .x = bounds.max.x, .y = bounds.max.y, .z = bounds.min.z },
+            .{ .x = bounds.min.x, .y = bounds.min.y, .z = bounds.max.z },
+            .{ .x = bounds.max.x, .y = bounds.min.y, .z = bounds.max.z },
+            .{ .x = bounds.min.x, .y = bounds.max.y, .z = bounds.max.z },
+            .{ .x = bounds.max.x, .y = bounds.max.y, .z = bounds.max.z },
+        };
 
-const PlaneKind = enum {
-    left,
-    right,
-    bottom,
-    top,
-    near,
-    far,
+        var left_outside = true;
+        var right_outside = true;
+        var bottom_outside = true;
+        var top_outside = true;
+        var near_outside = true;
+        var far_outside = true;
+
+        for (corners) |corner| {
+            const clip = transformPoint(self.view_projection, corner);
+            const w = if (@abs(clip.w) <= 0.00001) 0.00001 else clip.w;
+
+            if (clip.x >= -w) left_outside = false;
+            if (clip.x <= w) right_outside = false;
+            if (clip.y >= -w) bottom_outside = false;
+            if (clip.y <= w) top_outside = false;
+            if (clip.z >= -w) near_outside = false;
+            if (clip.z <= w) far_outside = false;
+        }
+
+        return !(left_outside or right_outside or bottom_outside or top_outside or near_outside or far_outside);
+    }
 };
 
 const MaterialBinding = struct {
@@ -813,38 +787,26 @@ pub const SceneRenderer = struct {
     }
 };
 
-fn extractPlane(matrix: rl.Matrix, kind: PlaneKind) Plane {
-    const row0 = [4]f32{ matrix.m0, matrix.m4, matrix.m8, matrix.m12 };
-    const row1 = [4]f32{ matrix.m1, matrix.m5, matrix.m9, matrix.m13 };
-    const row2 = [4]f32{ matrix.m2, matrix.m6, matrix.m10, matrix.m14 };
-    const row3 = [4]f32{ matrix.m3, matrix.m7, matrix.m11, matrix.m15 };
-
-    const values = switch (kind) {
-        .left => addRows(row3, row0),
-        .right => subtractRows(row3, row0),
-        .bottom => addRows(row3, row1),
-        .top => subtractRows(row3, row1),
-        .near => addRows(row3, row2),
-        .far => subtractRows(row3, row2),
-    };
-    return (Plane{
-        .normal = .{ .x = values[0], .y = values[1], .z = values[2] },
-        .distance = values[3],
-    }).normalize();
-}
-
-fn addRows(a: [4]f32, b: [4]f32) [4]f32 {
-    return .{ a[0] + b[0], a[1] + b[1], a[2] + b[2], a[3] + b[3] };
-}
-
-fn subtractRows(a: [4]f32, b: [4]f32) [4]f32 {
-    return .{ a[0] - b[0], a[1] - b[1], a[2] - b[2], a[3] - b[3] };
-}
-
 fn wrapUnitOffset(speed: f32, time_seconds: f64) f32 {
     if (speed == 0.0) return 0.0;
     const value = @as(f64, speed) * time_seconds;
     return @floatCast(value - @floor(value));
+}
+
+const ClipPoint = struct {
+    x: f32,
+    y: f32,
+    z: f32,
+    w: f32,
+};
+
+fn transformPoint(matrix: rl.Matrix, point: rl.Vector3) ClipPoint {
+    return .{
+        .x = matrix.m0 * point.x + matrix.m4 * point.y + matrix.m8 * point.z + matrix.m12,
+        .y = matrix.m1 * point.x + matrix.m5 * point.y + matrix.m9 * point.z + matrix.m13,
+        .z = matrix.m2 * point.x + matrix.m6 * point.y + matrix.m10 * point.z + matrix.m14,
+        .w = matrix.m3 * point.x + matrix.m7 * point.y + matrix.m11 * point.z + matrix.m15,
+    };
 }
 
 const TextureCache = struct {
