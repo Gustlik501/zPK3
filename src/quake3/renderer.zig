@@ -54,7 +54,6 @@ const lightmap_shader_fs: [:0]const u8 =
     \\uniform sampler2D texture1;
     \\uniform int useLightmap;
     \\uniform float lightmapScale;
-    \\uniform float lightmapGamma;
     \\uniform float alphaCutoff;
     \\uniform vec4 materialColor;
     \\uniform int useVertexRgb;
@@ -69,7 +68,7 @@ const lightmap_shader_fs: [:0]const u8 =
     \\    vec3 light = vec3(1.0);
     \\    if (useLightmap == 1) {
     \\        light = texture(texture1, fragTexCoord2).rgb;
-    \\        light = pow(max(light, vec3(0.0)), vec3(lightmapGamma)) * lightmapScale;
+    \\        light *= lightmapScale;
     \\    }
     \\    finalColor = vec4(albedo.rgb * light, albedo.a);
     \\}
@@ -259,7 +258,6 @@ pub const SceneRenderer = struct {
     lightmap_shader: rl.Shader,
     lightmap_use_loc: i32,
     lightmap_scale_loc: i32,
-    lightmap_gamma_loc: i32,
     alpha_cutoff_loc: i32,
     material_color_loc: i32,
     use_vertex_rgb_loc: i32,
@@ -268,8 +266,7 @@ pub const SceneRenderer = struct {
     tex_scale_loc: i32,
     use_environment_tc_loc: i32,
     camera_position_loc: i32,
-    lightmap_scale_tuning: f32 = 2.0,
-    lightmap_gamma_tuning: f32 = 0.85,
+    lightmap_scale_tuning: f32 = 1.0,
     draw_wireframe: bool = false,
     fullbright: bool = false,
     backface_culling: bool = true,
@@ -424,7 +421,6 @@ pub const SceneRenderer = struct {
             .lightmap_shader = lightmap_shader,
             .lightmap_use_loc = rl.getShaderLocation(lightmap_shader, "useLightmap"),
             .lightmap_scale_loc = rl.getShaderLocation(lightmap_shader, "lightmapScale"),
-            .lightmap_gamma_loc = rl.getShaderLocation(lightmap_shader, "lightmapGamma"),
             .alpha_cutoff_loc = rl.getShaderLocation(lightmap_shader, "alphaCutoff"),
             .material_color_loc = rl.getShaderLocation(lightmap_shader, "materialColor"),
             .use_vertex_rgb_loc = rl.getShaderLocation(lightmap_shader, "useVertexRgb"),
@@ -563,16 +559,11 @@ pub const SceneRenderer = struct {
     }
 
     pub fn adjustLightmapScale(self: *SceneRenderer, delta: f32) void {
-        self.lightmap_scale_tuning = @max(0.25, @min(4.0, self.lightmap_scale_tuning + delta));
-    }
-
-    pub fn adjustLightmapGamma(self: *SceneRenderer, delta: f32) void {
-        self.lightmap_gamma_tuning = @max(0.5, @min(1.5, self.lightmap_gamma_tuning + delta));
+        self.lightmap_scale_tuning = @max(0.5, @min(2.0, self.lightmap_scale_tuning + delta));
     }
 
     pub fn resetLightmapTuning(self: *SceneRenderer) void {
-        self.lightmap_scale_tuning = 2.0;
-        self.lightmap_gamma_tuning = 0.85;
+        self.lightmap_scale_tuning = 1.0;
     }
 
     fn updateVisibilityState(self: *SceneRenderer, camera_position: rl.Vector3) void {
@@ -675,10 +666,8 @@ pub const SceneRenderer = struct {
             }
             const use_lightmap: i32 = if (self.fullbright or self.draw_wireframe or !batch.use_lightmap) 0 else 1;
             const lightmap_scale: f32 = if (self.fullbright or self.draw_wireframe or !batch.use_lightmap) 1.0 else self.lightmap_scale_tuning;
-            const lightmap_gamma: f32 = if (self.fullbright or self.draw_wireframe or !batch.use_lightmap) 1.0 else self.lightmap_gamma_tuning;
             rl.setShaderValue(self.lightmap_shader, self.lightmap_use_loc, &use_lightmap, .int);
             rl.setShaderValue(self.lightmap_shader, self.lightmap_scale_loc, &lightmap_scale, .float);
-            rl.setShaderValue(self.lightmap_shader, self.lightmap_gamma_loc, &lightmap_gamma, .float);
             rl.setShaderValue(self.lightmap_shader, self.alpha_cutoff_loc, &batch.alpha_cutoff, .float);
             rl.setShaderValue(self.lightmap_shader, self.material_color_loc, &batch.binding.material_color, .vec4);
             const use_vertex_rgb: i32 = if (batch.binding.use_vertex_rgb) 1 else 0;
@@ -1651,7 +1640,11 @@ const LightmapCache = struct {
 };
 
 fn createLightmapTexture(bytes: []const u8) !rl.Texture2D {
-    const raw = try copyToRaylibAlloc(u8, bytes);
+    const shifted = try std.heap.page_allocator.alloc(u8, bytes.len);
+    defer std.heap.page_allocator.free(shifted);
+    colorShiftLightmapPixels(bytes, shifted);
+
+    const raw = try copyToRaylibAlloc(u8, shifted);
     const image = rl.Image{
         .data = raw,
         .width = bsp.lightmap_side,
@@ -1957,6 +1950,23 @@ fn loadTgaTexture(allocator: std.mem.Allocator, file_data: []const u8) !rl.Textu
     defer rl.unloadImage(image);
 
     return rl.loadTextureFromImage(image);
+}
+
+fn colorShiftLightmapPixels(src: []const u8, dst: []u8) void {
+    std.debug.assert(src.len == dst.len);
+    std.debug.assert(src.len % 3 == 0);
+
+    var index: usize = 0;
+    while (index + 2 < src.len) : (index += 3) {
+        const shifted = bsp.colorShiftLightingBytes(
+            .{ src[index], src[index + 1], src[index + 2], 255 },
+            bsp.q3_map_overbright_bits,
+            bsp.q3_overbright_bits,
+        );
+        dst[index] = shifted[0];
+        dst[index + 1] = shifted[1];
+        dst[index + 2] = shifted[2];
+    }
 }
 
 fn trimShaderLine(raw_line: []const u8) []const u8 {

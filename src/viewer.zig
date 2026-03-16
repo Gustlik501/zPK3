@@ -550,18 +550,14 @@ fn drawLightingInspector(renderer: *q3.renderer.SceneRenderer) void {
 
     const summary = std.fmt.bufPrintZ(
         &line_buf,
-        "Lightmap scale: {d:.2}  gamma: {d:.2}",
-        .{ renderer.lightmap_scale_tuning, renderer.lightmap_gamma_tuning },
+        "Lightmap scale tweak: {d:.2}  Quake reference: 1.00",
+        .{renderer.lightmap_scale_tuning},
     ) catch return;
     imgui.text(summary);
 
     if (imgui.button("Scale -")) renderer.adjustLightmapScale(-0.1);
     imgui.sameLine();
     if (imgui.button("Scale +")) renderer.adjustLightmapScale(0.1);
-    imgui.sameLine();
-    if (imgui.button("Gamma -")) renderer.adjustLightmapGamma(-0.05);
-    imgui.sameLine();
-    if (imgui.button("Gamma +")) renderer.adjustLightmapGamma(0.05);
 
     if (imgui.button("Reset lighting")) renderer.resetLightmapTuning();
 }
@@ -807,8 +803,8 @@ fn drawRuntimeStatsWindow(
 
     const lighting_line = std.fmt.bufPrintZ(
         &line_buf,
-        "Lighting: lightmap scale={d:.2}  gamma={d:.2}",
-        .{ renderer.lightmap_scale_tuning, renderer.lightmap_gamma_tuning },
+        "Lighting: Quake lightmap shift active  tweak scale={d:.2}",
+        .{renderer.lightmap_scale_tuning},
     ) catch return;
     imgui.text(lighting_line);
 
@@ -1009,8 +1005,8 @@ fn dumpStatsReport(
         },
     );
     std.debug.print(
-        "lighting: lightmap_scale={d:.3} lightmap_gamma={d:.3}\n",
-        .{ renderer.lightmap_scale_tuning, renderer.lightmap_gamma_tuning },
+        "lighting: quake_lightmap_shift=true tweak_scale={d:.3}\n",
+        .{renderer.lightmap_scale_tuning},
     );
     std.debug.print(
         "tracked_bytes: total={d} bsp={d} entities={d} collision={d} scene_objects={d} cache_meta={d} geometry={d} wireframe={d} materials={d} visibility={d} textures={d} lightmaps={d}\n",

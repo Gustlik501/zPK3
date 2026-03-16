@@ -2,6 +2,11 @@ const std = @import("std");
 const entities = @import("entities.zig");
 const qmath = @import("math.zig");
 
+// Match vanilla Quake 3's common hardware-gamma defaults:
+// r_mapOverBrightBits = 2, tr.overbrightBits = 1.
+pub const q3_map_overbright_bits: u5 = 2;
+pub const q3_overbright_bits: u5 = 1;
+
 pub const MapTexture = struct {
     name: []const u8,
     flags: i32,
@@ -15,6 +20,34 @@ pub const Vertex = struct {
     normal: [3]f32,
     color: [4]u8,
 };
+
+pub fn colorShiftLightingBytes(
+    input: [4]u8,
+    map_overbright_bits: u5,
+    overbright_bits: u5,
+) [4]u8 {
+    const shift: u5 = map_overbright_bits -| overbright_bits;
+    var r: u32 = @as(u32, input[0]) << shift;
+    var g: u32 = @as(u32, input[1]) << shift;
+    var b: u32 = @as(u32, input[2]) << shift;
+
+    if ((r | g | b) > 255) {
+        var max_value = if (r > g) r else g;
+        if (b > max_value) max_value = b;
+        if (max_value > 0) {
+            r = r * 255 / max_value;
+            g = g * 255 / max_value;
+            b = b * 255 / max_value;
+        }
+    }
+
+    return .{
+        @intCast(@min(r, 255)),
+        @intCast(@min(g, 255)),
+        @intCast(@min(b, 255)),
+        input[3],
+    };
+}
 
 pub const Face = struct {
     texture: i32,
@@ -598,7 +631,7 @@ fn parseVertices(allocator: std.mem.Allocator, data: []const u8, lump: Lump) ![]
             .texcoord = raw.texcoord,
             .lightmap_uv = raw.lightmap_uv,
             .normal = raw.normal,
-            .color = raw.color,
+            .color = colorShiftLightingBytes(raw.color, q3_map_overbright_bits, q3_overbright_bits),
         };
     }
 
